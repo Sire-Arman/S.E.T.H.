@@ -38,31 +38,36 @@ class LLMProvider(ABC):
     async def _stream_sentences(
         token_iter,            # async iterable of token strings
         get_content,           # callable(token) -> str
+        min_words: int = 15    # minimum words before yielding
     ) -> AsyncIterator[str]:
         """
         Internal helper that turns a raw token stream into sentence chunks.
-        Sentence boundary: any of  .  !  ?  ;
+        Accumulates chunks until they have at least ~15 words to prevent
+        fragmented TTS playback.
         """
         buffer = ""
-        # Regex: split AFTER the punctuation but keep it in the left part
-        _BOUNDARY = re.compile(r"(?<=[.!?;])")
+        # Split after . ! ? ; : \n but only if followed by space or end of string
+        _BOUNDARY = re.compile(r"(?<=[.!?;:\n])(?=\s|$)")
 
         async for token in token_iter:
             content = get_content(token)
             if not content:
                 continue
             buffer += content
-            # Check if we crossed a sentence boundary
+            
+            # Find all complete "sentences" in the buffer
             parts = _BOUNDARY.split(buffer)
             if len(parts) > 1:
-                # All complete sentences except the trailing fragment
-                for sentence in parts[:-1]:
-                    sentence = sentence.strip()
-                    if sentence:
-                        yield sentence
-                buffer = parts[-1]  # keep the incomplete tail
+                complete_text = "".join(parts[:-1])
+                
+                # Yield if it has enough words, OR if it contains a newline (paragraph)
+                if len(complete_text.split()) >= min_words or "\n" in complete_text:
+                    clean_text = complete_text.strip()
+                    if clean_text:
+                        yield clean_text
+                    buffer = parts[-1]
 
-        # Yield whatever is left in the buffer (last sentence may lack punctuation)
+        # Yield whatever is left
         remainder = buffer.strip()
         if remainder:
             yield remainder
@@ -102,20 +107,11 @@ class CohereProvider(LLMProvider):
 
     async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
         """Stream Cohere response as complete sentences."""
-        import asyncio
-
-        async def _token_gen():
-            loop = asyncio.get_event_loop()
-            # LangChain .stream() is synchronous; run in executor
-            tokens = await loop.run_in_executor(
-                None, lambda: list(self.client.stream(messages))
-            )
-            for t in tokens:
-                yield t
-
-        async for sentence in self._stream_sentences(_token_gen(), lambda t: t.content):
+        async for sentence in self._stream_sentences(self.client.astream(messages), lambda t: t.content):
             yield sentence
 
+
+class OpenAIProvider(LLMProvider):
     """OpenAI LLM provider."""
 
     def __init__(self, api_key: str, model: str, temperature: float):
@@ -148,17 +144,7 @@ class CohereProvider(LLMProvider):
             raise
     async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
         """Stream OpenAI response as complete sentences."""
-        import asyncio
-
-        async def _token_gen():
-            loop = asyncio.get_event_loop()
-            tokens = await loop.run_in_executor(
-                None, lambda: list(self.client.stream(messages))
-            )
-            for t in tokens:
-                yield t
-
-        async for sentence in self._stream_sentences(_token_gen(), lambda t: t.content):
+        async for sentence in self._stream_sentences(self.client.astream(messages), lambda t: t.content):
             yield sentence
 
 
@@ -208,7 +194,6 @@ class GeminiProvider(LLMProvider):
 
     async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
         """Stream Gemini response as complete sentences via google-genai."""
-        import asyncio
         from google import genai
 
         gemini_messages = [
@@ -218,28 +203,22 @@ class GeminiProvider(LLMProvider):
         ]
 
         async def _token_gen():
-            loop = asyncio.get_event_loop()
-            # generate_content_stream is synchronous in google-genai SDK
-            chunks = await loop.run_in_executor(
-                None,
-                lambda: list(
-                    self.client.models.generate_content_stream(
-                        model=self.model,
-                        contents=gemini_messages,
-                        config=genai.types.GenerateContentConfig(
-                            temperature=self.temperature
-                        ),
-                    )
+            response_stream = await self.client.aio.models.generate_content_stream(
+                model=self.model,
+                contents=gemini_messages,
+                config=genai.types.GenerateContentConfig(
+                    temperature=self.temperature
                 ),
             )
-            for c in chunks:
-                yield c
+            async for chunk in response_stream:
+                yield chunk
 
         async for sentence in self._stream_sentences(
             _token_gen(), lambda c: c.text or ""
         ):
             yield sentence
 
+class AnthropicProvider(LLMProvider):
     """Anthropic Claude LLM provider."""
 
     def __init__(self, api_key: str, model: str, temperature: float):
@@ -272,17 +251,7 @@ class GeminiProvider(LLMProvider):
             raise
     async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
         """Stream Anthropic response as complete sentences."""
-        import asyncio
-
-        async def _token_gen():
-            loop = asyncio.get_event_loop()
-            tokens = await loop.run_in_executor(
-                None, lambda: list(self.client.stream(messages))
-            )
-            for t in tokens:
-                yield t
-
-        async for sentence in self._stream_sentences(_token_gen(), lambda t: t.content):
+        async for sentence in self._stream_sentences(self.client.astream(messages), lambda t: t.content):
             yield sentence
 
 

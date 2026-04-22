@@ -163,7 +163,11 @@ class KokoroTTS:
             speed=self.speed,
             lang="en-us",
         )
-        return audio.astype(np.float32)
+        
+        audio = audio.astype(np.float32)
+        # Pad with 0.25s of silence to prevent sounddevice from cutting off the end
+        silence = np.zeros(int(SAMPLE_RATE * 0.25), dtype=np.float32)
+        return np.concatenate([audio, silence])
 
     # ------------------------------------------------------------------
     # Playback helpers
