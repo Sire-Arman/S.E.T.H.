@@ -52,16 +52,17 @@ class DeepgramSTT(STTProvider):
             raise
 
     def _transcribe_sync(self, audio_bytes: bytes):
-        """Synchronous transcription using Deepgram SDK v6.1.1."""
-        # Use Deepgram v1 API for prerecorded transcription
-        # API: transcribe_file(source, options)
-        # where source is the audio data and options are keyword arguments
+        """Synchronous transcription using Deepgram SDK v3."""
+        from deepgram import PrerecordedOptions
         
-        response = self.client.listen.v1.media.transcribe_file(
-            request=audio_bytes,
+        options = PrerecordedOptions(
             model=self.model,
             language=self.language,
             smart_format=True,
         )
+        
+        payload = {"buffer": audio_bytes}
+        
+        response = self.client.listen.rest.v("1").transcribe_file(payload, options)
         
         return response
