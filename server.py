@@ -1,0 +1,226 @@
+"""Pipecat WebSocket server for voice bot."""
+import asyncio
+import json
+import base64
+from loguru import logger
+import websockets
+
+from config import Settings
+from services.llm import LLMStore
+from services.stt import DeepgramSTT
+from models import MessageType
+from langchain_core.messages import HumanMessage, AIMessage
+
+# Initialize configuration and services
+settings = Settings()
+settings.validate()
+
+llm_store = LLMStore(settings)
+stt_service = DeepgramSTT(
+    api_key=settings.DEEPGRAM_API_KEY,
+    model=settings.DEEPGRAM_MODEL,
+    language=settings.DEEPGRAM_LANGUAGE,
+)
+
+logger.add(
+    "logs/pipecat.log",
+    level=settings.LOG_LEVEL,
+    rotation="500 MB",
+    retention="7 days",
+)
+logger.info("Pipecat Voice Bot Server initialized")
+logger.info(f"Default LLM: {settings.DEFAULT_LLM}")
+logger.info(f"Available LLMs: {llm_store.list_providers()}")
+
+
+async def handle_client(websocket):
+    """Handle incoming WebSocket client connection."""
+    client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
+    logger.info(f"Client connected: {client_id}")
+
+    # Initialize conversation history
+    messages = []
+
+    try:
+        async for message in websocket:
+            try:
+                # Try to parse as JSON
+                data = json.loads(message)
+                logger.debug(f"Received from {client_id}: {data.get('type')}")
+
+                if data.get("type") == MessageType.TEXT or data.get("type") =='message':
+                    user_message = data.get("data", "").strip()
+                    if not user_message:
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": MessageType.ERROR,
+                                    "data": "Empty message",
+                                }
+                            )
+                        )
+                        continue
+
+                    logger.info(f"User text: {user_message}")
+
+                    # Add user message to history
+                    messages.append(HumanMessage(content=user_message))
+
+                    try:
+                        # Get response from LLM
+                        logger.debug(f"Calling {settings.DEFAULT_LLM} API...")
+                        response = await llm_store.invoke(messages)
+
+                        logger.info(f"Bot response: {response}")
+
+                        # Add bot response to history
+                        messages.append(AIMessage(content=response))
+
+                        # Send response back to client
+                        await websocket.send(
+                            json.dumps(
+                                {"type": MessageType.RESPONSE, "data": response}
+                            )
+                        )
+                    except Exception as api_error:
+                        logger.error(f"LLM API error: {api_error}")
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": MessageType.ERROR,
+                                    "data": f"API error: {str(api_error)}",
+                                }
+                            )
+                        )
+
+                elif data.get("type") == MessageType.AUDIO or data.get("type") == "audio":
+                    logger.info("Audio message received")
+
+                    audio_data = data.get("data", "")
+                    if not audio_data:
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": MessageType.ERROR,
+                                    "data": "Empty audio data",
+                                }
+                            )
+                        )
+                        continue
+
+                    try:
+                        # Decode base64 audio
+                        logger.debug("Decoding base64 audio...")
+                        audio_bytes = base64.b64decode(audio_data)
+                        logger.info(f"Audio received: {len(audio_bytes)} bytes")
+
+                        # Transcribe using Deepgram
+                        logger.debug("Transcribing audio with Deepgram...")
+                        transcript = await stt_service.transcribe(audio_bytes)
+
+                        if not transcript:
+                            await websocket.send(
+                                json.dumps(
+                                    {
+                                        "type": MessageType.ERROR,
+                                        "data": "Failed to transcribe audio",
+                                    }
+                                )
+                            )
+                            continue
+
+                        logger.info(f"Transcript: {transcript}")
+
+                        # Add user message to history
+                        messages.append(HumanMessage(content=transcript))
+
+                        # Get LLM response
+                        logger.debug(f"Calling {settings.DEFAULT_LLM} API...")
+                        response = await llm_store.invoke(messages)
+
+                        logger.info(f"Bot response: {response}")
+
+                        # Add bot response to history
+                        messages.append(AIMessage(content=response))
+
+                        # Send response back to client
+                        await websocket.send(
+                            json.dumps(
+                                {"type": MessageType.RESPONSE, "data": response}
+                            )
+                        )
+                    except Exception as audio_error:
+                        logger.error(f"Audio processing error: {audio_error}")
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": MessageType.ERROR,
+                                    "data": f"Audio processing error: {str(audio_error)}",
+                                }
+                            )
+                        )
+
+                else:
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": MessageType.ERROR,
+                                "data": f"Unknown message type: {data.get('type')}",
+                            }
+                        )
+                    )
+
+            except json.JSONDecodeError:
+                # Not JSON, treat as plain text message
+                user_message = message.strip()
+                logger.info(f"Text message from {client_id}: {user_message}")
+
+                messages.append(HumanMessage(content=user_message))
+
+                try:
+                    response = await llm_store.invoke(messages)
+
+                    logger.info(f"Bot response: {response}")
+                    messages.append(AIMessage(content=response))
+
+                    await websocket.send(response)
+                except Exception as api_error:
+                    logger.error(f"LLM API error: {api_error}")
+                    await websocket.send(f"Error: {str(api_error)}")
+
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+                try:
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": MessageType.ERROR,
+                                "data": f"Server error: {str(e)}",
+                            }
+                        )
+                    )
+                except:
+                    pass
+
+    except websockets.exceptions.ConnectionClosed:
+        logger.info(f"Client disconnected: {client_id}")
+    except Exception as e:
+        logger.error(f"Client error: {e}")
+
+
+async def main():
+    """Run the WebSocket server."""
+    logger.info(f"Starting server on ws://{settings.SERVER_HOST}:{settings.SERVER_PORT}")
+
+    try:
+        async with websockets.serve(
+            handle_client, settings.SERVER_HOST, settings.SERVER_PORT
+        ):
+            logger.info("WebSocket server ready - waiting for connections")
+            await asyncio.Future()  # run forever
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

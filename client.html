@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pipecat Voice Bot</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        max-width: 600px;
+        margin: 50px auto;
+        padding: 20px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .container {
+        background: white;
+        border-radius: 10px;
+        padding: 30px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+      }
+      h1 {
+        color: #333;
+        text-align: center;
+        margin-bottom: 30px;
+      }
+      .status {
+        text-align: center;
+        padding: 10px;
+        margin-bottom: 20px;
+        border-radius: 5px;
+        font-weight: bold;
+      }
+      .connected {
+        background-color: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+      }
+      .disconnected {
+        background-color: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 20px;
+      }
+      button {
+        flex: 1;
+        padding: 12px;
+        font-size: 16px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-weight: bold;
+        transition: background-color 0.3s;
+      }
+      .connect-btn {
+        background-color: #667eea;
+        color: white;
+      }
+      .connect-btn:hover {
+        background-color: #5568d3;
+      }
+      .record-btn {
+        background-color: #4caf50;
+        color: white;
+      }
+      .record-btn:hover {
+        background-color: #45a049;
+      }
+      .record-btn.recording {
+        background-color: #f44336;
+      }
+      .transcript {
+        background-color: #f5f5f5;
+        padding: 15px;
+        border-radius: 5px;
+        min-height: 100px;
+        margin-top: 20px;
+        border: 1px solid #ddd;
+        max-height: 200px;
+        overflow-y: auto;
+      }
+      .message {
+        margin: 10px 0;
+        padding: 10px;
+        background-color: white;
+        border-left: 4px solid #667eea;
+      }
+      .user-message {
+        border-left-color: #4caf50;
+        text-align: right;
+      }
+      .bot-message {
+        border-left-color: #667eea;
+      }
+      .error {
+        color: #f44336;
+        font-size: 14px;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>🎤 Pipecat Voice Bot</h1>
+
+      <div class="status disconnected" id="status">❌ Disconnected</div>
+
+      <div class="controls">
+        <input
+          type="text"
+          id="serverUrl"
+          value="ws://127.0.0.1:8765"
+          placeholder="ws://localhost:8765"
+          style="
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+          "
+        />
+        <button class="connect-btn" onclick="toggleConnection()">
+          Connect
+        </button>
+      </div>
+
+      <button
+        class="record-btn"
+        id="recordBtn"
+        onclick="toggleRecording()"
+        disabled
+      >
+        🎙️ Start Recording
+      </button>
+
+      <div style="margin-top: 15px; display: flex; gap: 10px">
+        <input
+          type="text"
+          id="textInput"
+          placeholder="Or type a message..."
+          style="
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+          "
+          onkeypress="if (event.key === 'Enter') sendTextMessage();"
+        />
+        <button
+          style="
+            padding: 12px 20px;
+            background-color: #667eea;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+          "
+          onclick="sendTextMessage()"
+        >
+          Send
+        </button>
+      </div>
+
+      <div class="transcript" id="transcript">
+        <div style="color: #999; text-align: center">
+          Messages will appear here...
+        </div>
+      </div>
+
+      <div class="error" id="error"></div>
+    </div>
+
+    <script>
+      let ws = null;
+      let isRecording = false;
+      let mediaRecorder = null;
+
+      async function sendTextMessage() {
+        const textInput = document.getElementById("textInput");
+        const message = textInput.value.trim();
+
+        if (!message) {
+          showError("Please enter a message");
+          return;
+        }
+
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          showError("Not connected to server");
+          return;
+        }
+
+        logMessage("You: " + message, "user");
+
+        // Send as JSON message
+        const payload = JSON.stringify({
+          type: "message",
+          data: message,
+          timestamp: new Date().toISOString(),
+        });
+
+        ws.send(payload);
+        textInput.value = "";
+        showError("Waiting for response...");
+      }
+
+      async function toggleConnection() {
+        if (ws) {
+          ws.close();
+          ws = null;
+          updateStatus(false);
+        } else {
+          const url = document.getElementById("serverUrl").value;
+          await connect(url);
+        }
+      }
+
+      async function connect(url) {
+        try {
+          if (!url) {
+            showError("Please enter a WebSocket URL");
+            return;
+          }
+
+          console.log("Connecting to:", url);
+          showError("Connecting...");
+          ws = new WebSocket(url);
+
+          ws.onopen = () => {
+            updateStatus(true);
+            logMessage("Connected to bot server!", "system");
+            document.getElementById("recordBtn").disabled = false;
+            showError(""); // Clear any previous errors
+          };
+
+          ws.onmessage = (event) => {
+            console.log("Received:", event.data);
+
+            // Check if it's JSON
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === "response") {
+                logMessage("Bot: " + message.data, "bot");
+                showError("");
+              } else if (message.type === "transcript") {
+                logMessage("Transcript: " + message.data, "system");
+              } else {
+                logMessage(event.data, "bot");
+              }
+            } catch (e) {
+              // Not JSON, treat as plain text response
+              logMessage("Bot: " + event.data, "bot");
+              showError("");
+            }
+          };
+
+          ws.onerror = (error) => {
+            console.error("WebSocket error:", error);
+            showError("Connection error - check server is running at " + url);
+          };
+
+          ws.onclose = () => {
+            updateStatus(false);
+            document.getElementById("recordBtn").disabled = true;
+            logMessage("Disconnected", "system");
+            showError("Disconnected from server");
+          };
+        } catch (error) {
+          showError("Connection failed: " + error.message);
+        }
+      }
+
+      async function toggleRecording() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          showError("Not connected to server");
+          return;
+        }
+
+        if (!isRecording) {
+          // Start recording
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            mediaRecorder = new MediaRecorder(stream);
+            const audioChunks = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+              if (event.data.size > 0) {
+                audioChunks.push(event.data);
+              }
+            };
+
+            mediaRecorder.onstop = async () => {
+              // Wait a moment for all data to be collected
+              await new Promise((resolve) => setTimeout(resolve, 100));
+
+              // Combine all chunks into one blob
+              const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+
+              // Convert to base64 and send as message
+              const reader = new FileReader();
+              reader.onload = () => {
+                const base64 = reader.result.split(",")[1]; // Remove data:audio/webm;base64, prefix
+                const message = JSON.stringify({
+                  type: "audio",
+                  data: base64,
+                  timestamp: new Date().toISOString(),
+                });
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(message);
+                  logMessage("Audio sent to server", "system");
+                }
+              };
+              reader.readAsDataURL(audioBlob);
+
+              // Clear chunks for next recording
+              audioChunks.length = 0;
+              mediaRecorder.stream.getTracks().forEach((track) => track.stop());
+            };
+
+            mediaRecorder.start();
+            isRecording = true;
+            document.getElementById("recordBtn").textContent =
+              "⏹️ Stop Recording";
+            document.getElementById("recordBtn").classList.add("recording");
+            logMessage("Recording started...", "system");
+          } catch (error) {
+            showError("Microphone access denied: " + error.message);
+          }
+        } else {
+          // Stop recording - this will trigger onstop handler above
+          mediaRecorder.stop();
+          isRecording = false;
+          document.getElementById("recordBtn").textContent =
+            "🎙️ Start Recording";
+          document.getElementById("recordBtn").classList.remove("recording");
+          logMessage("Processing audio...", "system");
+        }
+      }
+
+      function updateStatus(connected) {
+        const statusEl = document.getElementById("status");
+        if (connected) {
+          statusEl.textContent = "✅ Connected";
+          statusEl.className = "status connected";
+        } else {
+          statusEl.textContent = "❌ Disconnected";
+          statusEl.className = "status disconnected";
+        }
+      }
+
+      function logMessage(message, type) {
+        const transcript = document.getElementById("transcript");
+        const messageEl = document.createElement("div");
+        messageEl.className = "message " + type + "-message";
+        messageEl.textContent = message;
+        transcript.appendChild(messageEl);
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+
+      function showError(message) {
+        document.getElementById("error").textContent = message;
+        setTimeout(() => {
+          document.getElementById("error").textContent = "";
+        }, 5000);
+      }
+    </script>
+  </body>
+</html>
