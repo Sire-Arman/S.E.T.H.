@@ -77,7 +77,12 @@ The `examples/` folder contains reference implementations using the **Pipecat SD
 ### Prerequisites
 
 - **Python 3.10–3.13** (3.14 not yet supported due to numba dependency)
-- Virtual environment at `../venv313/` relative to this project
+
+Create the virtual environment (one-time):
+
+```powershell
+py -3.13 -m venv .venv
+```
 
 ### 1. Configure API Keys
 
@@ -104,7 +109,7 @@ Copy-Item .env.example .env
 ### 2. Install Dependencies
 
 ```powershell
-& "..\venv313\Scripts\pip.exe" install -r requirements.txt
+& ".venv\Scripts\pip.exe" install -r requirements.txt
 ```
 
 ---
@@ -115,7 +120,7 @@ Copy-Item .env.example .env
 
 ```powershell
 # Option A: Direct
-& "..\venv313\Scripts\python.exe" server.py
+& ".venv\Scripts\python.exe" server.py
 
 # Option B: Helper script
 .\run_bot.ps1 server.py
@@ -138,7 +143,7 @@ Open `client.html` in your browser. It connects to `ws://127.0.0.1:8765` and sup
 ### Run Tests
 
 ```powershell
-& "..\venv313\Scripts\python.exe" tests.py
+& ".venv\Scripts\python.exe" tests.py
 ```
 
 ---
@@ -240,7 +245,7 @@ class MyProvider(LLMProvider):
 | `Cannot import 'genai' from 'google'` | Run `pip install google-genai` |
 | Connection refused on port 8765 | Start `server.py` first |
 | Audio transcription fails | Check Deepgram API key is valid; check `logs/pipecat.log` |
-| `venv313 not found` | Ensure `../venv313/` exists relative to this folder |
+| `.venv not found` | Create it with `py -3.13 -m venv .venv` |
 
 ---
 
