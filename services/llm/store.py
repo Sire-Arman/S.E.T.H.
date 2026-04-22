@@ -1,9 +1,10 @@
 """LLM provider store and interfaces."""
 from abc import ABC, abstractmethod
-from typing import List
+from typing import AsyncIterator, List
 from loguru import logger
 from config import Settings
 from langchain_core.messages import BaseMessage, AIMessage
+import re
 
 
 class LLMProvider(ABC):
@@ -18,6 +19,53 @@ class LLMProvider(ABC):
     def invoke_sync(self, messages: List[BaseMessage]) -> str:
         """Synchronous version of invoke."""
         pass
+
+    @abstractmethod
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """
+        Stream the LLM response and yield one complete sentence at a time.
+
+        Sentences are delimited by  .  !  ?  ;  so the TTS engine always
+        receives a meaningful, intonation-complete chunk rather than raw tokens.
+        Yields the remaining buffer after the final sentence-end token too.
+        """
+        pass
+
+    # ------------------------------------------------------------------
+    # Shared helper: accumulate token stream -> yield sentences
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def _stream_sentences(
+        token_iter,            # async iterable of token strings
+        get_content,           # callable(token) -> str
+    ) -> AsyncIterator[str]:
+        """
+        Internal helper that turns a raw token stream into sentence chunks.
+        Sentence boundary: any of  .  !  ?  ;
+        """
+        buffer = ""
+        # Regex: split AFTER the punctuation but keep it in the left part
+        _BOUNDARY = re.compile(r"(?<=[.!?;])")
+
+        async for token in token_iter:
+            content = get_content(token)
+            if not content:
+                continue
+            buffer += content
+            # Check if we crossed a sentence boundary
+            parts = _BOUNDARY.split(buffer)
+            if len(parts) > 1:
+                # All complete sentences except the trailing fragment
+                for sentence in parts[:-1]:
+                    sentence = sentence.strip()
+                    if sentence:
+                        yield sentence
+                buffer = parts[-1]  # keep the incomplete tail
+
+        # Yield whatever is left in the buffer (last sentence may lack punctuation)
+        remainder = buffer.strip()
+        if remainder:
+            yield remainder
 
 
 class CohereProvider(LLMProvider):
@@ -52,8 +100,22 @@ class CohereProvider(LLMProvider):
             logger.error(f"Cohere API error: {e}")
             raise
 
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """Stream Cohere response as complete sentences."""
+        import asyncio
 
-class OpenAIProvider(LLMProvider):
+        async def _token_gen():
+            loop = asyncio.get_event_loop()
+            # LangChain .stream() is synchronous; run in executor
+            tokens = await loop.run_in_executor(
+                None, lambda: list(self.client.stream(messages))
+            )
+            for t in tokens:
+                yield t
+
+        async for sentence in self._stream_sentences(_token_gen(), lambda t: t.content):
+            yield sentence
+
     """OpenAI LLM provider."""
 
     def __init__(self, api_key: str, model: str, temperature: float):
@@ -84,6 +146,20 @@ class OpenAIProvider(LLMProvider):
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """Stream OpenAI response as complete sentences."""
+        import asyncio
+
+        async def _token_gen():
+            loop = asyncio.get_event_loop()
+            tokens = await loop.run_in_executor(
+                None, lambda: list(self.client.stream(messages))
+            )
+            for t in tokens:
+                yield t
+
+        async for sentence in self._stream_sentences(_token_gen(), lambda t: t.content):
+            yield sentence
 
 
 class GeminiProvider(LLMProvider):
@@ -130,8 +206,40 @@ class GeminiProvider(LLMProvider):
             logger.error(f"Gemini API error: {e}")
             raise
 
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """Stream Gemini response as complete sentences via google-genai."""
+        import asyncio
+        from google import genai
 
-class AnthropicProvider(LLMProvider):
+        gemini_messages = [
+            {"role": "user" if m.type == "human" else "model",
+             "parts": [{"text": m.content}]}
+            for m in messages
+        ]
+
+        async def _token_gen():
+            loop = asyncio.get_event_loop()
+            # generate_content_stream is synchronous in google-genai SDK
+            chunks = await loop.run_in_executor(
+                None,
+                lambda: list(
+                    self.client.models.generate_content_stream(
+                        model=self.model,
+                        contents=gemini_messages,
+                        config=genai.types.GenerateContentConfig(
+                            temperature=self.temperature
+                        ),
+                    )
+                ),
+            )
+            for c in chunks:
+                yield c
+
+        async for sentence in self._stream_sentences(
+            _token_gen(), lambda c: c.text or ""
+        ):
+            yield sentence
+
     """Anthropic Claude LLM provider."""
 
     def __init__(self, api_key: str, model: str, temperature: float):
@@ -162,6 +270,20 @@ class AnthropicProvider(LLMProvider):
         except Exception as e:
             logger.error(f"Anthropic API error: {e}")
             raise
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """Stream Anthropic response as complete sentences."""
+        import asyncio
+
+        async def _token_gen():
+            loop = asyncio.get_event_loop()
+            tokens = await loop.run_in_executor(
+                None, lambda: list(self.client.stream(messages))
+            )
+            for t in tokens:
+                yield t
+
+        async for sentence in self._stream_sentences(_token_gen(), lambda t: t.content):
+            yield sentence
 
 
 class LLMStore:
@@ -173,52 +295,62 @@ class LLMStore:
         self.providers = {}
         self._initialize_providers()
 
+    # Map of provider name -> (factory function, required api_key attr, extra kwargs builder)
+    _PROVIDER_FACTORIES = {
+        "cohere":    lambda s: CohereProvider(
+                         api_key=s.COHERE_API_KEY,
+                         model=s.COHERE_MODEL,
+                         temperature=s.LLM_TEMPERATURE,
+                     ),
+        "openai":    lambda s: OpenAIProvider(
+                         api_key=s.OPENAI_API_KEY,
+                         model=s.OPENAI_MODEL,
+                         temperature=s.LLM_TEMPERATURE,
+                     ),
+        "gemini":    lambda s: GeminiProvider(
+                         api_key=s.GEMINI_API_KEY,
+                         temperature=s.LLM_TEMPERATURE,
+                     ),
+        "anthropic": lambda s: AnthropicProvider(
+                         api_key=s.ANTHROPIC_API_KEY,
+                         model=s.ANTHROPIC_MODEL,
+                         temperature=s.LLM_TEMPERATURE,
+                     ),
+    }
+
+    # Map of provider name -> settings attribute that holds its API key
+    _API_KEY_ATTRS = {
+        "cohere":    "COHERE_API_KEY",
+        "openai":    "OPENAI_API_KEY",
+        "gemini":    "GEMINI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }
+
     def _initialize_providers(self) -> None:
-        """Initialize all available LLM providers."""
-        # Cohere
-        if self.settings.COHERE_API_KEY:
-            self.providers["cohere"] = CohereProvider(
-                api_key=self.settings.COHERE_API_KEY,
-                model=self.settings.COHERE_MODEL,
-                temperature=self.settings.LLM_TEMPERATURE,
-            )
-            logger.info("Cohere provider initialized")
+        """
+        Initialize ONLY the provider set as DEFAULT_LLM in settings.
 
-        # OpenAI
-        if self.settings.OPENAI_API_KEY:
-            self.providers["openai"] = OpenAIProvider(
-                api_key=self.settings.OPENAI_API_KEY,
-                model=self.settings.OPENAI_MODEL,
-                temperature=self.settings.LLM_TEMPERATURE,
-            )
-            logger.info("OpenAI provider initialized")
+        Only the single default provider is imported and instantiated at startup.
+        To switch provider: change DEFAULT_LLM in .env and restart the server.
+        """
+        name = self.settings.DEFAULT_LLM
 
-        # Gemini
-        if self.settings.GEMINI_API_KEY:
-            self.providers["gemini"] = GeminiProvider(
-                api_key=self.settings.GEMINI_API_KEY,
-                temperature=self.settings.LLM_TEMPERATURE,
-            )
-            logger.info("Gemini provider initialized")
-
-        # Anthropic
-        if self.settings.ANTHROPIC_API_KEY:
-            self.providers["anthropic"] = AnthropicProvider(
-                api_key=self.settings.ANTHROPIC_API_KEY,
-                model=self.settings.ANTHROPIC_MODEL,
-                temperature=self.settings.LLM_TEMPERATURE,
-            )
-            logger.info("Anthropic provider initialized")
-
-        # Ensure default provider is available
-        if self.settings.DEFAULT_LLM not in self.providers:
-            logger.error(
-                f"Default LLM '{self.settings.DEFAULT_LLM}' not initialized. "
-                f"Available providers: {list(self.providers.keys())}"
-            )
+        if name not in self._PROVIDER_FACTORIES:
             raise ValueError(
-                f"Default LLM provider '{self.settings.DEFAULT_LLM}' not available"
+                f"Unknown LLM provider '{name}'. "
+                f"Valid choices: {list(self._PROVIDER_FACTORIES.keys())}"
             )
+
+        key_attr = self._API_KEY_ATTRS[name]
+        api_key  = getattr(self.settings, key_attr, "")
+
+        if not api_key:
+            raise ValueError(
+                f"DEFAULT_LLM is set to '{name}' but {key_attr} is not configured in .env"
+            )
+
+        self.providers[name] = self._PROVIDER_FACTORIES[name](self.settings)
+        logger.info(f"LLM provider initialized: {name}")
 
     def get_provider(self, provider_name: str = None) -> LLMProvider:
         """Get a specific LLM provider."""
@@ -234,6 +366,19 @@ class LLMStore:
     async def invoke(
         self, messages: List[BaseMessage], provider: str = None
     ) -> str:
-        """Invoke the LLM with a list of messages."""
+        """Invoke the LLM with a list of messages (full response)."""
         llm_provider = self.get_provider(provider)
         return await llm_provider.invoke(messages)
+
+    async def invoke_stream(
+        self, messages: List[BaseMessage], provider: str = None
+    ) -> AsyncIterator[str]:
+        """
+        Stream sentences from the LLM response.
+
+        Yields one complete sentence (ending in . ! ? ;) at a time so the TTS
+        engine can start speaking before the LLM has finished generating.
+        """
+        llm_provider = self.get_provider(provider)
+        async for sentence in llm_provider.invoke_stream(messages):
+            yield sentence

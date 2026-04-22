@@ -8,6 +8,7 @@ import websockets
 from config import Settings
 from services.llm import LLMStore
 from services.stt import DeepgramSTT
+from services.tts import KokoroTTS
 from models import MessageType
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -20,6 +21,10 @@ stt_service = DeepgramSTT(
     api_key=settings.DEEPGRAM_API_KEY,
     model=settings.DEEPGRAM_MODEL,
     language=settings.DEEPGRAM_LANGUAGE,
+)
+tts_service = KokoroTTS(
+    voice="af_heart",   # change to any voice in AVAILABLE_VOICES
+    speed=1.0,
 )
 
 logger.add(
@@ -67,16 +72,17 @@ async def handle_client(websocket):
                     messages.append(HumanMessage(content=user_message))
 
                     try:
-                        # Get response from LLM
-                        logger.debug(f"Calling {settings.DEFAULT_LLM} API...")
-                        response = await llm_store.invoke(messages)
+                        # Stream sentences from LLM -> speak each one as it arrives
+                        logger.debug(f"Streaming from {settings.DEFAULT_LLM} ...")
+                        sentence_stream = llm_store.invoke_stream(messages)
+                        response = await tts_service.speak_stream(sentence_stream)
 
                         logger.info(f"Bot response: {response}")
 
                         # Add bot response to history
                         messages.append(AIMessage(content=response))
 
-                        # Send response back to client
+                        # Send full text response back to client
                         await websocket.send(
                             json.dumps(
                                 {"type": MessageType.RESPONSE, "data": response}
@@ -134,16 +140,17 @@ async def handle_client(websocket):
                         # Add user message to history
                         messages.append(HumanMessage(content=transcript))
 
-                        # Get LLM response
-                        logger.debug(f"Calling {settings.DEFAULT_LLM} API...")
-                        response = await llm_store.invoke(messages)
+                        # Stream sentences from LLM -> speak each one as it arrives
+                        logger.debug(f"Streaming from {settings.DEFAULT_LLM} ...")
+                        sentence_stream = llm_store.invoke_stream(messages)
+                        response = await tts_service.speak_stream(sentence_stream)
 
                         logger.info(f"Bot response: {response}")
 
                         # Add bot response to history
                         messages.append(AIMessage(content=response))
 
-                        # Send response back to client
+                        # Send full text response back to client
                         await websocket.send(
                             json.dumps(
                                 {"type": MessageType.RESPONSE, "data": response}
@@ -178,7 +185,8 @@ async def handle_client(websocket):
                 messages.append(HumanMessage(content=user_message))
 
                 try:
-                    response = await llm_store.invoke(messages)
+                    sentence_stream = llm_store.invoke_stream(messages)
+                    response = await tts_service.speak_stream(sentence_stream)
 
                     logger.info(f"Bot response: {response}")
                     messages.append(AIMessage(content=response))
