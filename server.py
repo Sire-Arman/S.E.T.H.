@@ -10,7 +10,7 @@ from services.llm import LLMStore
 from services.stt import DeepgramSTT
 from services.tts import KokoroTTS
 from models import MessageType
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 # Initialize configuration and services
 settings = Settings()
@@ -44,7 +44,9 @@ async def handle_client(websocket):
     logger.info(f"Client connected: {client_id}")
 
     # Initialize conversation history
-    messages = []
+    messages = [
+        SystemMessage(content=settings.SYSTEM_INSTRUCTION),
+    ]
 
     try:
         async for message in websocket:

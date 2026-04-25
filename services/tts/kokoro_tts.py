@@ -15,8 +15,16 @@ Provides KokoroTTS, a lightweight wrapper around kokoro-onnx that:
 Install:
     pip install kokoro-onnx sounddevice numpy
 
-Model files (~350 MB) are downloaded from GitHub releases on first use and
+Model files are downloaded from GitHub releases on first use and
 cached in the same directory as this file.
+
+Optimisation notes
+------------------
+* Default model is the **INT8** variant (~88 MB, ~3.5× smaller than FP32).
+* ONNX Runtime thread counts are pinned to the physical core count at
+  import time via OMP_NUM_THREADS / ORT_NUM_THREADS env vars.
+* A silent warm-up synthesis runs during __init__ to pre-allocate
+  ONNX internal memory pools, eliminating cold-start latency.
 """
 
 import os
@@ -27,10 +35,47 @@ import asyncio
 import urllib.request
 from typing import AsyncIterator
 
+# ---------------------------------------------------------------------------
+# ONNX Runtime thread pinning  (MUST happen before kokoro_onnx import)
+# ---------------------------------------------------------------------------
+# Pin to physical core count to avoid hyperthreading overhead.
+# os.cpu_count() returns logical processors; we detect physical cores
+# via a simple heuristic or fall back to logical / 2.
+
+def _detect_physical_cores() -> int:
+    """Best-effort detection of physical (not logical) CPU core count."""
+    try:
+        # Windows: use wmi via subprocess (no extra deps)
+        import subprocess
+        out = subprocess.check_output(
+            ["wmic", "cpu", "get", "NumberOfCores"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        for line in out.strip().splitlines():
+            line = line.strip()
+            if line.isdigit():
+                return int(line)
+    except Exception:
+        pass
+    # Fallback: assume ~75% of logical processors are physical
+    logical = os.cpu_count() or 4
+    return max(1, logical * 3 // 4)
+
+_PHYSICAL_CORES = _detect_physical_cores()
+os.environ.setdefault("OMP_NUM_THREADS", str(_PHYSICAL_CORES))
+os.environ.setdefault("ORT_NUM_THREADS", str(_PHYSICAL_CORES))
+
 import numpy as np
 import sounddevice as sd
 from loguru import logger
 from kokoro_onnx import Kokoro
+
+logger.info(
+    f"[KokoroTTS] ONNX thread config: "
+    f"OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS')}  "
+    f"ORT_NUM_THREADS={os.environ.get('ORT_NUM_THREADS')}  "
+    f"(physical cores={_PHYSICAL_CORES})"
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,7 +100,8 @@ AVAILABLE_VOICES: list[str] = [
 # Model file management
 # ---------------------------------------------------------------------------
 _SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
-_MODEL_FILE  = os.path.join(_SERVICE_DIR, "kokoro-v1.0.onnx")
+_MODEL_FILE  = os.path.join(_SERVICE_DIR, "kokoro-v1.0.int8.onnx")   # INT8 (~88 MB)
+_MODEL_FP32  = os.path.join(_SERVICE_DIR, "kokoro-v1.0.onnx")        # FP32 fallback (~310 MB)
 _VOICES_FILE = os.path.join(_SERVICE_DIR, "voices-v1.0.bin")
 _GH_RELEASE  = (
     "https://github.com/thewh1teagle/kokoro-onnx/"
@@ -69,7 +115,11 @@ def _download_if_missing(local_path: str, filename: str) -> None:
         return
 
     url = _GH_RELEASE + filename
-    sizes = {"kokoro-v1.0.onnx": "~310 MB", "voices-v1.0.bin": "~40 MB"}
+    sizes = {
+        "kokoro-v1.0.int8.onnx": "~88 MB",
+        "kokoro-v1.0.onnx": "~310 MB",
+        "voices-v1.0.bin": "~40 MB",
+    }
     logger.info(f"[KokoroTTS] Downloading {filename} {sizes.get(filename, '')} ...")
     logger.info(f"[KokoroTTS] URL: {url}")
 
@@ -119,7 +169,7 @@ class KokoroTTS:
         ----------
         voice:        Kokoro voice id (see AVAILABLE_VOICES).
         speed:        Speech speed multiplier (0.5 = slow, 1.0 = normal, 1.5 = fast).
-        model_file:   Path to kokoro-v1.0.onnx   (auto-downloaded if missing).
+        model_file:   Path to the ONNX model (default: INT8 variant, auto-downloaded).
         voices_file:  Path to voices-v1.0.bin    (auto-downloaded if missing).
         """
         if voice not in AVAILABLE_VOICES:
@@ -132,16 +182,28 @@ class KokoroTTS:
         self.voice = voice
         self.speed = speed
 
-        logger.info("[KokoroTTS] Loading model ...")
+        # Determine which model filename to download
+        model_basename = os.path.basename(model_file)
+
+        logger.info(f"[KokoroTTS] Loading model ({model_basename}) ...")
         t0 = time.perf_counter()
 
-        _download_if_missing(model_file,  "kokoro-v1.0.onnx")
+        _download_if_missing(model_file,  model_basename)
         _download_if_missing(voices_file, "voices-v1.0.bin")
 
         self._kokoro = Kokoro(model_file, voices_file)
 
         elapsed = time.perf_counter() - t0
-        logger.info(f"[KokoroTTS] Model ready in {elapsed:.2f}s  (voice={voice})")
+        logger.info(f"[KokoroTTS] Model ready in {elapsed:.2f}s  (voice={voice}, model={model_basename})")
+
+        # Warm-up: run a tiny synthesis to pre-allocate ONNX memory pools
+        self._warmup()
+
+    def _warmup(self) -> None:
+        """Run a silent synthesis to eliminate cold-start latency."""
+        t0 = time.perf_counter()
+        _ = self._kokoro.create("Hello.", voice=self.voice, speed=self.speed, lang="en-us")
+        logger.info(f"[KokoroTTS] Warm-up done in {time.perf_counter() - t0:.3f}s")
 
     # ------------------------------------------------------------------
     # Core synthesis

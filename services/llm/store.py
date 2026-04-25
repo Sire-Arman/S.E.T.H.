@@ -38,12 +38,12 @@ class LLMProvider(ABC):
     async def _stream_sentences(
         token_iter,            # async iterable of token strings
         get_content,           # callable(token) -> str
-        min_words: int = 15    # minimum words before yielding
+        min_words: int = 5     # minimum words before yielding
     ) -> AsyncIterator[str]:
         """
         Internal helper that turns a raw token stream into sentence chunks.
-        Accumulates chunks until they have at least ~15 words to prevent
-        fragmented TTS playback.
+        Accumulates chunks until they have at least ~5 words to prevent
+        fragmented TTS playback while keeping TTFT low.
         """
         buffer = ""
         # Split after . ! ? ; : \n but only if followed by space or end of string
