@@ -325,3 +325,82 @@ class KokoroTTS:
             f"{time.perf_counter() - total_start:.2f}s"
         )
         return " ".join(full_response)
+
+    # ------------------------------------------------------------------
+    # WAV encoding for browser streaming
+    # ------------------------------------------------------------------
+
+    def synthesize_wav_bytes(self, text: str) -> bytes:
+        """
+        Synthesize *text* and return raw WAV bytes (24 kHz, 16-bit mono).
+
+        This is used to stream audio back to the browser over WebSocket
+        instead of playing on the server's speakers.
+        """
+        import io
+        import wave
+
+        audio = self.synthesize(text)
+        if len(audio) == 0:
+            return b""
+
+        # Convert float32 [-1, 1] → int16
+        pcm = (audio * 32767).astype(np.int16)
+
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(pcm.tobytes())
+
+        return buf.getvalue()
+
+    async def stream_to_client(
+        self,
+        sentence_stream: AsyncIterator[str],
+    ) -> AsyncIterator[tuple[str, bytes]]:
+        """
+        Consume an async sentence generator and yield (sentence, wav_bytes)
+        pairs for each sentence.
+
+        The server can then send these over WebSocket to the browser.
+
+        Example
+        -------
+            async for sentence, wav_bytes in tts.stream_to_client(
+                llm_store.invoke_stream(messages)
+            ):
+                # send sentence text + base64(wav_bytes) to browser
+        """
+        first = True
+        total_start = time.perf_counter()
+
+        async for sentence in sentence_stream:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+
+            # Synthesize in thread pool
+            t0 = time.perf_counter()
+            wav_bytes = await asyncio.get_event_loop().run_in_executor(
+                None, self.synthesize_wav_bytes, sentence
+            )
+            synth_s = time.perf_counter() - t0
+
+            if first:
+                ttft = time.perf_counter() - total_start
+                logger.info(f"[KokoroTTS] TTFT (client stream) = {ttft:.3f}s")
+                first = False
+
+            logger.debug(
+                f"[KokoroTTS] WAV chunk: '{sentence[:60]}...' | "
+                f"synth={synth_s:.3f}s  size={len(wav_bytes)} bytes"
+            )
+
+            yield sentence, wav_bytes
+
+        logger.info(
+            f"[KokoroTTS] Client stream done. Total = "
+            f"{time.perf_counter() - total_start:.2f}s"
+        )

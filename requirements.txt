@@ -1,4 +1,4 @@
-﻿# Core dependencies
+# Core dependencies
 websockets==14.1
 python-dotenv==1.0.1
 loguru==0.7.2
@@ -16,6 +16,9 @@ anthropic>=0.96.0
 
 # Speech-to-Text
 deepgram-sdk==3.11.0
+
+# Text-to-Speech (cloud)
+cartesia[websockets]>=3.0.0
 
 # Data handling
 pydantic==2.10.5

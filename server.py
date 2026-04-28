@@ -8,7 +8,7 @@ import websockets
 from config import Settings
 from services.llm import LLMStore
 from services.stt import DeepgramSTT
-from services.tts import KokoroTTS
+from services.tts import KokoroTTS, CartesiaTTS
 from models import MessageType
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
@@ -22,10 +22,19 @@ stt_service = DeepgramSTT(
     model=settings.DEEPGRAM_MODEL,
     language=settings.DEEPGRAM_LANGUAGE,
 )
-tts_service = KokoroTTS(
-    voice="af_heart",   # change to any voice in AVAILABLE_VOICES
-    speed=1.0,
-)
+
+# TTS provider selection
+if settings.DEFAULT_TTS == "cartesia":
+    tts_service = CartesiaTTS(
+        api_key=settings.CARTESIA_API_KEY,
+        voice_id=settings.CARTESIA_VOICE_ID,
+        model_id=settings.CARTESIA_MODEL,
+    )
+else:
+    tts_service = KokoroTTS(
+        voice="af_heart",   # change to any voice in KOKORO_VOICES
+        speed=1.0,
+    )
 
 logger.add(
     "logs/pipecat.log",
@@ -36,6 +45,68 @@ logger.add(
 logger.info("Pipecat Voice Bot Server initialized")
 logger.info(f"Default LLM: {settings.DEFAULT_LLM}")
 logger.info(f"Available LLMs: {llm_store.list_providers()}")
+
+
+# ------------------------------------------------------------------
+# Helper: process user text, stream LLM → TTS → WebSocket
+# ------------------------------------------------------------------
+
+async def process_and_stream(user_text: str, messages: list, websocket) -> str:
+    """
+    Stream LLM response through TTS and send audio chunks to the browser.
+
+    For each sentence:
+      1. Send a 'sentence' message with the text
+      2. Send an 'audio_response' message with base64-encoded WAV
+      3. At the end, send a 'response' message with the full text
+
+    Returns the full concatenated response text.
+    """
+    logger.info(f"User text: {user_text}")
+    messages.append(HumanMessage(content=user_text))
+
+    try:
+        logger.debug(f"Streaming from {settings.DEFAULT_LLM} ...")
+        sentence_stream = llm_store.invoke_stream(messages)
+        full_response = []
+
+        async for sentence, wav_bytes in tts_service.stream_to_client(sentence_stream):
+            full_response.append(sentence)
+
+            # Send sentence text
+            await websocket.send(json.dumps({
+                "type": MessageType.SENTENCE,
+                "data": sentence,
+            }))
+
+            # Send audio chunk
+            if wav_bytes:
+                await websocket.send(json.dumps({
+                    "type": MessageType.AUDIO_RESPONSE,
+                    "data": base64.b64encode(wav_bytes).decode("ascii"),
+                }))
+
+        response_text = " ".join(full_response)
+        logger.info(f"Bot response: {response_text}")
+
+        # Add bot response to history
+        messages.append(AIMessage(content=response_text))
+
+        # Send full text response (signals completion)
+        await websocket.send(json.dumps({
+            "type": MessageType.RESPONSE,
+            "data": response_text,
+        }))
+
+        return response_text
+
+    except Exception as api_error:
+        logger.error(f"LLM/TTS pipeline error: {api_error}")
+        await websocket.send(json.dumps({
+            "type": MessageType.ERROR,
+            "data": f"API error: {str(api_error)}",
+        }))
+        return ""
 
 
 async def handle_client(websocket):
@@ -55,7 +126,7 @@ async def handle_client(websocket):
                 data = json.loads(message)
                 logger.debug(f"Received from {client_id}: {data.get('type')}")
 
-                if data.get("type") == MessageType.TEXT or data.get("type") =='message':
+                if data.get("type") == MessageType.TEXT or data.get("type") == 'message':
                     user_message = data.get("data", "").strip()
                     if not user_message:
                         await websocket.send(
@@ -68,38 +139,7 @@ async def handle_client(websocket):
                         )
                         continue
 
-                    logger.info(f"User text: {user_message}")
-
-                    # Add user message to history
-                    messages.append(HumanMessage(content=user_message))
-
-                    try:
-                        # Stream sentences from LLM -> speak each one as it arrives
-                        logger.debug(f"Streaming from {settings.DEFAULT_LLM} ...")
-                        sentence_stream = llm_store.invoke_stream(messages)
-                        response = await tts_service.speak_stream(sentence_stream)
-
-                        logger.info(f"Bot response: {response}")
-
-                        # Add bot response to history
-                        messages.append(AIMessage(content=response))
-
-                        # Send full text response back to client
-                        await websocket.send(
-                            json.dumps(
-                                {"type": MessageType.RESPONSE, "data": response}
-                            )
-                        )
-                    except Exception as api_error:
-                        logger.error(f"LLM API error: {api_error}")
-                        await websocket.send(
-                            json.dumps(
-                                {
-                                    "type": MessageType.ERROR,
-                                    "data": f"API error: {str(api_error)}",
-                                }
-                            )
-                        )
+                    await process_and_stream(user_message, messages, websocket)
 
                 elif data.get("type") == MessageType.AUDIO or data.get("type") == "audio":
                     logger.info("Audio message received")
@@ -137,27 +177,14 @@ async def handle_client(websocket):
                             )
                             continue
 
-                        logger.info(f"Transcript: {transcript}")
+                        # Send transcript back to client for display
+                        await websocket.send(json.dumps({
+                            "type": "transcript",
+                            "data": transcript,
+                        }))
 
-                        # Add user message to history
-                        messages.append(HumanMessage(content=transcript))
+                        await process_and_stream(transcript, messages, websocket)
 
-                        # Stream sentences from LLM -> speak each one as it arrives
-                        logger.debug(f"Streaming from {settings.DEFAULT_LLM} ...")
-                        sentence_stream = llm_store.invoke_stream(messages)
-                        response = await tts_service.speak_stream(sentence_stream)
-
-                        logger.info(f"Bot response: {response}")
-
-                        # Add bot response to history
-                        messages.append(AIMessage(content=response))
-
-                        # Send full text response back to client
-                        await websocket.send(
-                            json.dumps(
-                                {"type": MessageType.RESPONSE, "data": response}
-                            )
-                        )
                     except Exception as audio_error:
                         logger.error(f"Audio processing error: {audio_error}")
                         await websocket.send(
@@ -183,20 +210,7 @@ async def handle_client(websocket):
                 # Not JSON, treat as plain text message
                 user_message = message.strip()
                 logger.info(f"Text message from {client_id}: {user_message}")
-
-                messages.append(HumanMessage(content=user_message))
-
-                try:
-                    sentence_stream = llm_store.invoke_stream(messages)
-                    response = await tts_service.speak_stream(sentence_stream)
-
-                    logger.info(f"Bot response: {response}")
-                    messages.append(AIMessage(content=response))
-
-                    await websocket.send(response)
-                except Exception as api_error:
-                    logger.error(f"LLM API error: {api_error}")
-                    await websocket.send(f"Error: {str(api_error)}")
+                await process_and_stream(user_message, messages, websocket)
 
             except Exception as e:
                 logger.error(f"Error processing message: {e}")

@@ -18,9 +18,10 @@ class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    CARTESIA_API_KEY: str = os.getenv("CARTESIA_API_KEY", "")
 
     # LLM Configuration
-    DEFAULT_LLM: str = os.getenv("DEFAULT_LLM", "cohere")  # cohere, gemini, openai, anthropic
+    DEFAULT_LLM: str = os.getenv("DEFAULT_LLM", "cohere")  # cohere, gemini, openai, anthropic, ollama
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "500"))
 
@@ -32,6 +33,17 @@ class Settings:
 
     # Anthropic Settings
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+
+    # Ollama Settings (local, no API key needed)
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3-voice")
+
+    # TTS Configuration
+    DEFAULT_TTS: str = os.getenv("DEFAULT_TTS", "kokoro")  # kokoro or cartesia
+
+    # Cartesia TTS Settings
+    CARTESIA_VOICE_ID: str = os.getenv("CARTESIA_VOICE_ID", "f786b574-daa5-4673-aa0c-cbe3e8534c02")
+    CARTESIA_MODEL: str = os.getenv("CARTESIA_MODEL", "sonic-3")
 
     # Deepgram STT Settings
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova-2")

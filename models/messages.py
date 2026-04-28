@@ -12,6 +12,8 @@ class MessageType(str, Enum):
     RESPONSE = "response"
     ERROR = "error"
     STATUS = "status"
+    AUDIO_RESPONSE = "audio_response"   # base64 WAV chunk sent to browser
+    SENTENCE = "sentence"               # individual sentence text during streaming
 
 
 class WebSocketMessage(BaseModel):

@@ -255,6 +255,80 @@ class AnthropicProvider(LLMProvider):
             yield sentence
 
 
+class OllamaProvider(LLMProvider):
+    """Ollama LLM provider (local, uses OpenAI-compatible API)."""
+
+    def __init__(self, base_url: str, model: str, temperature: float):
+        """Initialize Ollama provider via OpenAI client."""
+        from openai import OpenAI, AsyncOpenAI
+
+        self.client = OpenAI(base_url=base_url, api_key="ollama")
+        self.async_client = AsyncOpenAI(base_url=base_url, api_key="ollama")
+        self.model = model
+        self.temperature = temperature
+
+    async def invoke(self, messages: List[BaseMessage]) -> str:
+        """Invoke Ollama API asynchronously."""
+        import asyncio
+
+        try:
+            response = await asyncio.to_thread(self.invoke_sync, messages)
+            return response
+        except Exception as e:
+            logger.error(f"Ollama API error: {e}")
+            raise
+
+    def invoke_sync(self, messages: List[BaseMessage]) -> str:
+        """Invoke Ollama API synchronously."""
+        try:
+            openai_messages = self._to_openai_messages(messages)
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=openai_messages,
+                temperature=self.temperature,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Ollama API error: {e}")
+            raise
+
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """Stream Ollama response as complete sentences."""
+        openai_messages = self._to_openai_messages(messages)
+
+        async def _token_gen():
+            stream = await self.async_client.chat.completions.create(
+                model=self.model,
+                messages=openai_messages,
+                temperature=self.temperature,
+                stream=True,
+            )
+            async for chunk in stream:
+                yield chunk
+
+        async for sentence in self._stream_sentences(
+            _token_gen(),
+            lambda c: c.choices[0].delta.content if c.choices[0].delta.content else "",
+        ):
+            yield sentence
+
+    @staticmethod
+    def _to_openai_messages(messages: List[BaseMessage]) -> list:
+        """Convert LangChain messages to OpenAI message format."""
+        result = []
+        for msg in messages:
+            if msg.type == "system":
+                role = "system"
+            elif msg.type == "human":
+                role = "user"
+            elif msg.type == "ai":
+                role = "assistant"
+            else:
+                role = "user"
+            result.append({"role": role, "content": msg.content})
+        return result
+
+
 class LLMStore:
     """Store for managing multiple LLM providers."""
 
@@ -285,6 +359,11 @@ class LLMStore:
                          model=s.ANTHROPIC_MODEL,
                          temperature=s.LLM_TEMPERATURE,
                      ),
+        "ollama":    lambda s: OllamaProvider(
+                         base_url=s.OLLAMA_BASE_URL,
+                         model=s.OLLAMA_MODEL,
+                         temperature=s.LLM_TEMPERATURE,
+                     ),
     }
 
     # Map of provider name -> settings attribute that holds its API key
@@ -293,6 +372,7 @@ class LLMStore:
         "openai":    "OPENAI_API_KEY",
         "gemini":    "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
+        "ollama":    None,  # Local provider, no API key required
     }
 
     def _initialize_providers(self) -> None:
@@ -311,12 +391,14 @@ class LLMStore:
             )
 
         key_attr = self._API_KEY_ATTRS[name]
-        api_key  = getattr(self.settings, key_attr, "")
 
-        if not api_key:
-            raise ValueError(
-                f"DEFAULT_LLM is set to '{name}' but {key_attr} is not configured in .env"
-            )
+        # Ollama (and future local providers) don't need an API key
+        if key_attr is not None:
+            api_key = getattr(self.settings, key_attr, "")
+            if not api_key:
+                raise ValueError(
+                    f"DEFAULT_LLM is set to '{name}' but {key_attr} is not configured in .env"
+                )
 
         self.providers[name] = self._PROVIDER_FACTORIES[name](self.settings)
         logger.info(f"LLM provider initialized: {name}")
