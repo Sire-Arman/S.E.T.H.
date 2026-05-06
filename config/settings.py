@@ -37,6 +37,7 @@ class Settings:
     # Ollama Settings (local, no API key needed)
     OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3-voice")
+    OLLAMA_AGENT_MODEL: str = os.getenv("OLLAMA_AGENT_MODEL", "qwen3:8b")
 
     # TTS Configuration
     DEFAULT_TTS: str = os.getenv("DEFAULT_TTS", "kokoro")  # kokoro or cartesia
@@ -56,6 +57,13 @@ class Settings:
             "You are a helpful voice assistant. Keep responses concise and conversational.",
         )
     )
+
+    # ── Agent Configuration ──────────────────────────────────────
+    AGENT_LLM: str = os.getenv("AGENT_LLM", os.getenv("DEFAULT_LLM", "cohere"))
+    AGENT_SEARCH: str = os.getenv("AGENT_SEARCH", "tavily")
+
+    # Tavily Search
+    TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
