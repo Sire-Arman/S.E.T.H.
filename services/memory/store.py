@@ -63,12 +63,7 @@ class MemoryStore:
 
     def search(self, query: str, top_k: int = 5) -> list[str]:
         """Return top-k most relevant memory facts for the query string."""
-        try:
-            total = self._table.count_rows()
-        except Exception:
-            return []
-
-        if total == 0:
+        if self.count() == 0:
             return []
 
         query_vec = self._embed(query)
@@ -98,7 +93,6 @@ class MemoryStore:
     def count(self) -> int:
         """Total stored memories for this user."""
         try:
-            df = self._table.to_pandas()
-            return int((df["user_id"] == self.user_id).sum())
+            return self._table.count_rows(filter=f"user_id = '{self.user_id}'")
         except Exception:
             return 0

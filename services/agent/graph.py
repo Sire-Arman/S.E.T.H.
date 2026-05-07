@@ -144,6 +144,7 @@ def build_agent_graph(
             try:
                 cp_id = checkpoint_manager.save(messages)
                 logger.debug(f"Checkpoint saved: {cp_id[:8]}…")
+                print(f"  ✓ checkpoint {cp_id[:8]}…  |  {memory_store.count() if memory_store else '—'} memories stored")
             except Exception as e:
                 logger.error(f"Checkpoint save failed: {e}")
                 print(f"\n  [⚠ Checkpoint save failed: {e}]\n")

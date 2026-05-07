@@ -88,7 +88,7 @@ class Settings:
 
     # ── Checkpoint Configuration ──────────────────────────────────
     CHECKPOINT_ENABLED: bool = os.getenv("CHECKPOINT_ENABLED", "true").lower() == "true"
-    CHECKPOINT_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "./data/checkpoints.db")
+    CHECKPOINT_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "./data/checkpoints.sqlite")
 
     # ── Default User ──────────────────────────────────────────────
     # Override with --user flag in CLI, or a UUID once login is added.

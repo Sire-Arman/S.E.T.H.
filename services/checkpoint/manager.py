@@ -1,51 +1,79 @@
-"""Conversation checkpoint manager backed by LanceDB.
+"""Conversation checkpoint manager backed by SQLite.
 
-Stores full message-history snapshots indexed by user_id / session_id /
-checkpoint_id.  Supports list, restore, and fork operations so a user can
-travel back to any previous state of the conversation.
+Stores full message-history snapshots in a single `checkpoints.db` file.
+Supports list, restore, and fork operations so a user can travel back
+to any previous state of the conversation.
+
+Zero external dependencies — uses Python's built-in sqlite3 module.
 """
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from loguru import logger
 
-CHECKPOINT_TABLE = "checkpoints"
+
+_DDL = """
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    thread_id    TEXT NOT NULL,
+    label        TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_session ON checkpoints (user_id, session_id);
+"""
 
 
 class CheckpointManager:
-    """Save, list, restore, and fork conversation checkpoints.
+    """Save, list, restore, and fork conversation checkpoints via SQLite.
 
     Args:
-        user_id:    Persistent user identity (e.g. "user_arman_admin" or a UUID).
+        user_id:    Persistent user identity (e.g. ``"user_arman_admin"`` or a UUID).
         session_id: Current conversation session UUID.
-        db_path:    Path to the LanceDB checkpoint database file.
+        db_path:    Path to the SQLite database file (single file, no directory).
     """
 
     def __init__(self, user_id: str, session_id: str, db_path: str = "./data/checkpoints.db"):
-        import lancedb
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
         self.user_id = user_id
         self.session_id = session_id
         self.db_path = db_path
-        self._db = lancedb.connect(db_path)
-        self._table = self._get_or_create_table()
+        self._init_db()
 
     # ── Internal helpers ───────────────────────────────────────────
 
-    def _get_or_create_table(self):
-        from services.memory.schema import CHECKPOINT_SCHEMA
-        if CHECKPOINT_TABLE in self._db.table_names():
-            return self._db.open_table(CHECKPOINT_TABLE)
-        logger.info(f"Creating LanceDB checkpoint table at '{self.db_path}'")
-        return self._db.create_table(CHECKPOINT_TABLE, schema=CHECKPOINT_SCHEMA)
+    @contextmanager
+    def _conn(self):
+        """Yield a thread-safe SQLite connection."""
+        con = sqlite3.connect(self.db_path, check_same_thread=False)
+        con.row_factory = sqlite3.Row
+        try:
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    def _init_db(self) -> None:
+        with self._conn() as con:
+            con.executescript(_DDL)
+        logger.debug(f"Checkpoint DB ready: {self.db_path}")
 
     @staticmethod
     def _serialize(messages: list) -> str:
-        """Serialize LangChain messages to a stable JSON format."""
-        serialized = []
+        """Serialize LangChain messages to a stable JSON string."""
+        out = []
         for msg in messages:
-            item = {
+            item: dict = {
                 "type": msg.type,
                 "content": msg.content if isinstance(msg.content, str) else str(msg.content),
             }
@@ -58,14 +86,19 @@ class CheckpointManager:
                     {"id": tc.get("id", ""), "name": tc.get("name", ""), "args": tc.get("args", {})}
                     for tc in msg.tool_calls
                 ]
-            serialized.append(item)
-        return json.dumps(serialized, ensure_ascii=False)
+            out.append(item)
+        return json.dumps(out, ensure_ascii=False)
 
     @staticmethod
     def _deserialize(messages_json: str) -> list:
         """Deserialize JSON back to LangChain message objects."""
         from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
-        _MAP = {"human": HumanMessage, "ai": AIMessage, "system": SystemMessage, "tool": ToolMessage}
+        _MAP = {
+            "human": HumanMessage,
+            "ai": AIMessage,
+            "system": SystemMessage,
+            "tool": ToolMessage,
+        }
         result = []
         for item in json.loads(messages_json):
             cls = _MAP.get(item["type"], HumanMessage)
@@ -78,14 +111,12 @@ class CheckpointManager:
         return result
 
     def _session_count(self) -> int:
-        """Count checkpoints in the current session (used for auto-labelling)."""
-        try:
-            df = self._table.to_pandas()
-            return int(
-                ((df["user_id"] == self.user_id) & (df["session_id"] == self.session_id)).sum()
-            )
-        except Exception:
-            return 0
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE user_id=? AND session_id=?",
+                (self.user_id, self.session_id),
+            ).fetchone()
+            return row[0] if row else 0
 
     # ── Public API ─────────────────────────────────────────────────
 
@@ -93,16 +124,21 @@ class CheckpointManager:
         """Snapshot the current messages. Returns the new checkpoint_id."""
         checkpoint_id = str(uuid.uuid4())
         auto_label = label or f"Turn {self._session_count() + 1} — {datetime.now().strftime('%H:%M:%S')}"
-        record = {
-            "id": checkpoint_id,
-            "user_id": self.user_id,
-            "session_id": self.session_id,
-            "thread_id": thread_id or self.session_id,
-            "label": auto_label,
-            "messages_json": self._serialize(messages),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._table.add([record])
+        with self._conn() as con:
+            con.execute(
+                """INSERT INTO checkpoints
+                   (id, user_id, session_id, thread_id, label, messages_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    checkpoint_id,
+                    self.user_id,
+                    self.session_id,
+                    thread_id or self.session_id,
+                    auto_label,
+                    self._serialize(messages),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
         logger.debug(f"Checkpoint saved: {checkpoint_id[:8]}… ({len(messages)} msgs)")
         return checkpoint_id
 
@@ -111,21 +147,23 @@ class CheckpointManager:
 
         Args:
             session_id: Filter to a specific session. Pass ``"__all__"`` to
-                        list every session for the user.  Defaults to the
+                        list every session for the user. Defaults to the
                         current session.
         """
-        try:
-            df = self._table.to_pandas()
-        except Exception:
-            return []
-
-        df = df[df["user_id"] == self.user_id]
         target_session = session_id if session_id is not None else self.session_id
-        if target_session != "__all__":
-            df = df[df["session_id"] == target_session]
+
+        if target_session == "__all__":
+            sql = "SELECT * FROM checkpoints WHERE user_id=? ORDER BY created_at ASC"
+            params = (self.user_id,)
+        else:
+            sql = "SELECT * FROM checkpoints WHERE user_id=? AND session_id=? ORDER BY created_at ASC"
+            params = (self.user_id, target_session)
+
+        with self._conn() as con:
+            rows = con.execute(sql, params).fetchall()
 
         results = []
-        for _, row in df.iterrows():
+        for row in rows:
             try:
                 msg_count = len(self._deserialize(row["messages_json"]))
             except Exception:
@@ -137,8 +175,6 @@ class CheckpointManager:
                 "created_at": row["created_at"],
                 "message_count": msg_count,
             })
-
-        results.sort(key=lambda x: x["created_at"])
         return results
 
     def restore(self, checkpoint_id: str) -> list:
@@ -147,16 +183,16 @@ class CheckpointManager:
         Raises:
             ValueError: If the checkpoint_id is not found.
         """
-        try:
-            df = self._table.to_pandas()
-        except Exception as e:
-            raise ValueError(f"Could not read checkpoint table: {e}") from e
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT messages_json FROM checkpoints WHERE id=?",
+                (checkpoint_id,),
+            ).fetchone()
 
-        row = df[df["id"] == checkpoint_id]
-        if row.empty:
+        if row is None:
             raise ValueError(f"Checkpoint '{checkpoint_id}' not found.")
 
-        messages = self._deserialize(row.iloc[0]["messages_json"])
+        messages = self._deserialize(row["messages_json"])
         logger.info(f"Restored checkpoint {checkpoint_id[:8]}… ({len(messages)} msgs)")
         return messages
 
@@ -166,29 +202,45 @@ class CheckpointManager:
         Returns:
             Tuple of (new_checkpoint_id, new_session_id).
         """
-        try:
-            df = self._table.to_pandas()
-        except Exception as e:
-            raise ValueError(f"Could not read checkpoint table: {e}") from e
+        with self._conn() as con:
+            row = con.execute(
+                "SELECT messages_json FROM checkpoints WHERE id=?",
+                (checkpoint_id,),
+            ).fetchone()
 
-        row = df[df["id"] == checkpoint_id]
-        if row.empty:
+        if row is None:
             raise ValueError(f"Checkpoint '{checkpoint_id}' not found.")
 
         new_session = new_session_id or str(uuid.uuid4())
         new_checkpoint_id = str(uuid.uuid4())
-        original = row.iloc[0]
 
-        record = {
-            "id": new_checkpoint_id,
-            "user_id": self.user_id,
-            "session_id": new_session,
-            "thread_id": new_session,
-            "label": f"Fork of {checkpoint_id[:8]}… @ {datetime.now().strftime('%H:%M:%S')}",
-            "messages_json": original["messages_json"],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._table.add([record])
-        self.session_id = new_session  # manager switches to new branch
+        with self._conn() as con:
+            con.execute(
+                """INSERT INTO checkpoints
+                   (id, user_id, session_id, thread_id, label, messages_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    new_checkpoint_id,
+                    self.user_id,
+                    new_session,
+                    new_session,
+                    f"Fork of {checkpoint_id[:8]}… @ {datetime.now().strftime('%H:%M:%S')}",
+                    row["messages_json"],
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+        self.session_id = new_session
         logger.info(f"Forked {checkpoint_id[:8]}… → session {new_session[:8]}…")
         return new_checkpoint_id, new_session
+
+    def delete_session(self, session_id: str | None = None) -> int:
+        """Delete all checkpoints for a session. Returns count deleted."""
+        sid = session_id or self.session_id
+        with self._conn() as con:
+            cur = con.execute(
+                "DELETE FROM checkpoints WHERE user_id=? AND session_id=?",
+                (self.user_id, sid),
+            )
+        logger.info(f"Deleted {cur.rowcount} checkpoints for session {sid[:8]}…")
+        return cur.rowcount
