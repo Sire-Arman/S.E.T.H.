@@ -20,6 +20,7 @@ def create_llm(provider: str, settings: "Settings") -> "BaseChatModel":
     Supported providers:
         - ``cohere``  — uses ``langchain-cohere`` (``ChatCohere``)
         - ``ollama``  — uses ``langchain-ollama`` (``ChatOllama``)
+        - ``groq``    — uses ``langchain-groq`` (``ChatGroq``)
 
     The returned model supports ``.bind_tools()`` for LangGraph tool calling.
 
@@ -32,10 +33,12 @@ def create_llm(provider: str, settings: "Settings") -> "BaseChatModel":
         return _create_cohere(settings)
     elif provider == "ollama":
         return _create_ollama(settings)
+    elif provider == "groq":
+        return _create_groq(settings)
     else:
         raise ValueError(
             f"Unknown agent LLM provider '{provider}'. "
-            f"Supported: cohere, ollama"
+            f"Supported: cohere, ollama, groq"
         )
 
 
@@ -72,4 +75,20 @@ def _create_ollama(settings: "Settings") -> "BaseChatModel":
         temperature=settings.LLM_TEMPERATURE,
     )
     logger.info(f"Agent LLM: Ollama ({settings.OLLAMA_AGENT_MODEL} @ {base_url})")
+    return llm
+
+
+def _create_groq(settings: "Settings") -> "BaseChatModel":
+    if not settings.GROQ_API_KEY:
+        raise ValueError(
+            "AGENT_LLM is set to 'groq' but GROQ_API_KEY is not configured."
+        )
+    from langchain_groq import ChatGroq
+
+    llm = ChatGroq(
+        groq_api_key=settings.GROQ_API_KEY,
+        model=settings.GROQ_MODEL,
+        temperature=settings.LLM_TEMPERATURE,
+    )
+    logger.info(f"Agent LLM: Groq ({settings.GROQ_MODEL})")
     return llm

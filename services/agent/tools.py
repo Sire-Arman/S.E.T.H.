@@ -28,7 +28,7 @@ async def web_search(query: str) -> str:
     """
     from langchain_tavily import TavilySearch
 
-    api_key = os.getenv("TAVILY_API_KEY", "")
+    api_key = os.getenv("TAVILY_API_KEY", "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")
     if not api_key:
         return "Error: TAVILY_API_KEY is not configured."
 

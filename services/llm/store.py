@@ -255,6 +255,44 @@ class AnthropicProvider(LLMProvider):
             yield sentence
 
 
+class GroqProvider(LLMProvider):
+    """Groq LLM provider."""
+
+    def __init__(self, api_key: str, model: str, temperature: float):
+        """Initialize Groq provider."""
+        from langchain_groq import ChatGroq
+
+        self.client = ChatGroq(
+            groq_api_key=api_key, model=model, temperature=temperature
+        )
+        self.model = model
+
+    async def invoke(self, messages: List[BaseMessage]) -> str:
+        """Invoke Groq API asynchronously."""
+        import asyncio
+
+        try:
+            response = await asyncio.to_thread(self.invoke_sync, messages)
+            return response
+        except Exception as e:
+            logger.error(f"Groq API error: {e}")
+            raise
+
+    def invoke_sync(self, messages: List[BaseMessage]) -> str:
+        """Invoke Groq API synchronously."""
+        try:
+            response = self.client.invoke(messages)
+            return response.content
+        except Exception as e:
+            logger.error(f"Groq API error: {e}")
+            raise
+
+    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
+        """Stream Groq response as complete sentences."""
+        async for sentence in self._stream_sentences(self.client.astream(messages), lambda t: t.content):
+            yield sentence
+
+
 class OllamaProvider(LLMProvider):
     """Ollama LLM provider (local, uses OpenAI-compatible API)."""
 
@@ -364,6 +402,11 @@ class LLMStore:
                          model=s.OLLAMA_MODEL,
                          temperature=s.LLM_TEMPERATURE,
                      ),
+        "groq":      lambda s: GroqProvider(
+                         api_key=s.GROQ_API_KEY,
+                         model=s.GROQ_MODEL,
+                         temperature=s.LLM_TEMPERATURE,
+                     ),
     }
 
     # Map of provider name -> settings attribute that holds its API key
@@ -373,6 +416,7 @@ class LLMStore:
         "gemini":    "GEMINI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "ollama":    None,  # Local provider, no API key required
+        "groq":      "GROQ_API_KEY",
     }
 
     def _initialize_providers(self) -> None:

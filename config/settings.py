@@ -19,6 +19,8 @@ class Settings:
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     CARTESIA_API_KEY: str = os.getenv("CARTESIA_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+
 
     # LLM Configuration
     DEFAULT_LLM: str = os.getenv("DEFAULT_LLM", "cohere")  # cohere, gemini, openai, anthropic, ollama
@@ -39,6 +41,9 @@ class Settings:
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen3-voice")
     OLLAMA_AGENT_MODEL: str = os.getenv("OLLAMA_AGENT_MODEL", "qwen3:8b")
 
+    # Groq Settings
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
     # TTS Configuration
     DEFAULT_TTS: str = os.getenv("DEFAULT_TTS", "kokoro")  # kokoro or cartesia
 
@@ -51,12 +56,20 @@ class Settings:
     DEEPGRAM_LANGUAGE: str = os.getenv("DEEPGRAM_LANGUAGE", "en")
 
     # System Instruction
-    SYSTEM_INSTRUCTION: str = (
-        os.getenv(
+    @classmethod
+    def get_system_instruction(cls) -> str:
+        """Load system prompt from file if exists, otherwise fallback to env."""
+        prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "system.prompt")
+        if os.path.exists(prompt_path):
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        
+        return os.getenv(
             "SYSTEM_INSTRUCTION",
             "You are a helpful voice assistant. Keep responses concise and conversational.",
         )
-    )
+
+    SYSTEM_INSTRUCTION: str = "" # Initialized in validate()
 
     # ── Agent Configuration ──────────────────────────────────────
     AGENT_LLM: str = os.getenv("AGENT_LLM", os.getenv("DEFAULT_LLM", "cohere"))
@@ -71,6 +84,8 @@ class Settings:
     @classmethod
     def validate(cls) -> None:
         """Validate that required settings are configured."""
+        cls.SYSTEM_INSTRUCTION = cls.get_system_instruction()
+        
         if not cls.DEEPGRAM_API_KEY:
             raise ValueError("DEEPGRAM_API_KEY environment variable is not set")
         if not cls.DEFAULT_LLM:
