@@ -78,6 +78,22 @@ class Settings:
     # Tavily Search
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
+    # ── Memory Configuration ─────────────────────────────────────
+    MEMORY_ENABLED: bool = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
+    MEMORY_DB_PATH: str = os.getenv("MEMORY_DB_PATH", "./data/memory.db")
+    MEMORY_TOP_K: int = int(os.getenv("MEMORY_TOP_K", "5"))
+    # Model used for lightweight fact extraction (defaults to Cohere)
+    MEMORY_LLM: str = os.getenv("MEMORY_LLM", "cohere")
+    MEMORY_EMBEDDING_MODEL: str = os.getenv("MEMORY_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+
+    # ── Checkpoint Configuration ──────────────────────────────────
+    CHECKPOINT_ENABLED: bool = os.getenv("CHECKPOINT_ENABLED", "true").lower() == "true"
+    CHECKPOINT_DB_PATH: str = os.getenv("CHECKPOINT_DB_PATH", "./data/checkpoints.db")
+
+    # ── Default User ──────────────────────────────────────────────
+    # Override with --user flag in CLI, or a UUID once login is added.
+    DEFAULT_USER_ID: str = os.getenv("DEFAULT_USER_ID", "user_arman_admin")
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
