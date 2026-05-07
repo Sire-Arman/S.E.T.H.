@@ -1,8 +1,9 @@
 """Agent tools for the LangGraph workflow.
 
 Tools:
-    - web_search  — real-time web search via Tavily
-    - fetch_url   — fetch & extract text from a URL (httpx + trafilatura)
+    - get_current_datetime — returns the current date, time, and timezone
+    - web_search           — real-time web search via Tavily
+    - fetch_url            — fetch & extract text from a URL (httpx + trafilatura)
 """
 from __future__ import annotations
 
@@ -14,6 +15,33 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from config import Settings
+
+
+# ── Date / Time ────────────────────────────────────────────────────
+
+
+@tool
+def get_current_datetime(timezone_name: str = "Asia/Karachi") -> str:
+    """Return the current date and time.
+
+    Use this whenever the user asks what time it is, what today's date is,
+    what day of the week it is, or any other current date/time question.
+    Do NOT use web_search for date or time queries.
+
+    Args:
+        timezone_name: IANA timezone string, e.g. 'Asia/Karachi', 'UTC', 'America/New_York'.
+                       Defaults to 'Asia/Karachi'.
+    """
+    try:
+        from datetime import datetime
+        import zoneinfo
+        tz = zoneinfo.ZoneInfo(timezone_name)
+        now = datetime.now(tz)
+        return now.strftime(f"%A, %B %-d %Y  %I:%M %p  ({timezone_name})")
+    except Exception:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        return now.strftime("%A, %B %d %Y  %H:%M UTC")
 
 
 # ── Web Search ──────────────────────────────────────────────────────
@@ -124,4 +152,4 @@ async def fetch_url(url: str) -> str:
 
 def get_tools() -> list:
     """Return the list of tools available to the agent."""
-    return [web_search, fetch_url]
+    return [get_current_datetime, web_search, fetch_url]

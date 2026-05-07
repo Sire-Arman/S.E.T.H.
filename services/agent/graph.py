@@ -107,7 +107,18 @@ def build_agent_graph(
             from langchain_core.messages import SystemMessage
             messages = [SystemMessage(content=full_system)] + messages
 
-        response = llm_with_tools.invoke(messages)
+        try:
+            response = llm_with_tools.invoke(messages)
+        except Exception as e:
+            # Groq raises BadRequestError with code='tool_use_failed' when the model
+            # generates a malformed tool call. Retry without tools so the agent can
+            # still answer — this is a graceful fallback, not a silent swallow.
+            err_str = str(e)
+            if "tool_use_failed" in err_str or "Failed to call a function" in err_str:
+                logger.warning("Groq tool_use_failed — retrying without tools")
+                response = llm.invoke(messages)   # plain LLM, no tools bound
+            else:
+                raise
         return {"messages": [response]}
 
     # ── Node 3: Post-process (extract facts + checkpoint) ──────────
