@@ -1,6 +1,17 @@
-# Pipecat AI Voice Bot
+# Pipecat AI — SETH Voice & Agent Assistant
 
-A modular voice assistant with streaming LLM output, real-time Kokoro TTS, and speech-to-text via Deepgram — all over WebSocket.
+A modular AI assistant with a real-time voice pipeline and a persistent LangGraph agent with semantic memory and conversation checkpoints.
+
+---
+
+## Roadmap
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| **Phase 0** | ✅ Done | Core voice bot — WebSocket server, Deepgram STT, Kokoro/Cartesia TTS, multi-LLM streaming |
+| **Phase 1** | ✅ Done | LangGraph ReAct agent — web search (Tavily), URL fetch, Groq/Cohere/Ollama providers, CLI REPL |
+| **Phase 2** | ✅ Done | Persistent memory (LanceDB) + conversation checkpoints (SQLite) in the agent CLI |
+| **Phase 3** | 🔲 Planned | Merge Phase 2 memory + checkpoints into WebSocket voice server |
 
 ---
 
@@ -9,71 +20,172 @@ A modular voice assistant with streaming LLM output, real-time Kokoro TTS, and s
 ```
 pipecat_ai/
 ├── config/
-│   ├── __init__.py
-│   └── settings.py            # Centralized env-based configuration
+│   └── settings.py                 # All env-based config (LLM, TTS, memory, checkpoints)
+├── data/                           # Auto-created at runtime
+│   ├── memory.db/                  # LanceDB — semantic memory vectors (user_arman_admin)
+│   └── checkpoints.sqlite          # SQLite — conversation snapshots
 ├── models/
-│   ├── __init__.py
-│   └── messages.py            # WebSocket message types (Pydantic)
+│   └── messages.py                 # WebSocket message types (Pydantic)
 ├── services/
-│   ├── __init__.py
+│   ├── agent/                      # LangGraph ReAct agent
+│   │   ├── graph.py                # 4-node graph: memory_retrieve → agent ⇌ tools → post_process
+│   │   ├── llm_factory.py          # Agent LLM factory (Cohere, Ollama, Groq)
+│   │   └── tools.py                # web_search (Tavily) + fetch_url (httpx + trafilatura)
+│   ├── memory/                     # Phase 2 — Semantic memory
+│   │   ├── schema.py               # PyArrow schema for LanceDB memory table
+│   │   ├── store.py                # MemoryStore — embed, search, add, clear (LanceDB)
+│   │   └── extractor.py            # MemoryExtractor — Cohere LLM fact extraction
+│   ├── checkpoint/                 # Phase 2 — Conversation snapshots
+│   │   └── manager.py              # CheckpointManager — save, list, restore, fork (SQLite)
 │   ├── llm/
-│   │   ├── __init__.py
-│   │   └── store.py           # LLM provider (Cohere, OpenAI, Gemini, Anthropic)
+│   │   └── store.py                # Voice bot LLM providers (Cohere, OpenAI, Gemini, Anthropic, Ollama, Groq)
 │   ├── stt/
-│   │   ├── __init__.py
-│   │   └── deepgram_stt.py    # Deepgram speech-to-text
+│   │   └── deepgram_stt.py         # Deepgram speech-to-text
 │   └── tts/
-│       ├── __init__.py
-│       └── kokoro_tts.py      # Kokoro-ONNX text-to-speech (local, CPU-friendly)
-├── examples/
-│   ├── bot.py                 # Pipecat SDK WebSocket client (reference)
-│   └── daily_bot.py           # Pipecat SDK Daily.co WebRTC bot (reference)
-├── logs/                      # Auto-created at runtime
-├── server.py                  # Main WebSocket server
-├── client.html                # Browser UI (text + voice chat)
-├── tests.py                   # Integration tests
-├── run_bot.ps1                # PowerShell helper to run with venv
+│       ├── kokoro_tts.py           # Kokoro-ONNX TTS (local, CPU)
+│       └── cartesia_tts.py         # Cartesia WebSocket TTS (cloud)
+├── system.prompt                   # Agent system prompt (edit freely, loaded at startup)
+├── server.py                       # Main WebSocket voice server
+├── run_agent.py                    # Phase 2 CLI REPL — agent + memory + checkpoints
+├── examples/                       # Pipecat SDK reference bots (not used by main server)
+├── frontend/                       # Browser widget (widget.html, widget.css, widget.js)
+├── logs/                           # Auto-created at runtime
 ├── requirements.txt
-├── .env                       # Your API keys (not committed)
-├── .env.example               # Template for .env
-└── .gitignore
+├── .env                            # Your API keys (never committed)
+└── .env.example                    # Template for .env
 ```
 
 ---
 
-## Architecture
+## Phase 1 — LangGraph ReAct Agent
 
-Every user turn follows this pipeline:
+### Agent Architecture
 
 ```
- User
-  │ Voice / Text
+User message
+    │
+    ▼
+memory_retrieve_node
+  ├─ Search LanceDB: top-k memories semantically similar to user message
+  └─ Inject memory context into system prompt
+    │
+    ▼
+agent_node  ◄──────────┐
+  ├─ System prompt: base + memory context      │
+  ├─ Invoke Groq LLM with tools bound          │
+  └─ Decides: tool call OR final answer        │
+              │                tools_node ─────┘
+              │                (web_search / fetch_url)
+              ▼
+post_process_node
+  ├─ Extract new durable facts (Cohere LLM)
+  ├─ Store facts → LanceDB
+  └─ Save conversation snapshot → SQLite
+    │
+    ▼
+   END
+```
+
+### Running the Agent CLI
+
+```powershell
+# Activate venv first
+.venv\Scripts\activate
+
+# Run with defaults (user: user_arman_admin, new session UUID)
+python run_agent.py
+
+# Run with custom user / restore a specific session
+python run_agent.py --user my_uuid --session abc123
+```
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `<message>` | Chat with the agent |
+| `/memory` | Show memory chunks retrieved for the last turn |
+| `/checkpoints` | List checkpoints in the current session |
+| `/checkpoints all` | List checkpoints across all sessions |
+| `/restore <id>` | Restore a past checkpoint (8-char prefix works) |
+| `/fork <id>` | Branch a checkpoint into a new session |
+| `/clear-memory` | Delete all stored memories for current user |
+| `/whoami` | Show current user ID and session ID |
+| `/help` | Show help |
+| `clear` | Reset conversation (memories are preserved) |
+| `quit` / `exit` | Exit |
+
+---
+
+## Phase 2 — Persistent Memory & Checkpoints
+
+### Memory (LanceDB)
+
+- **Storage**: `data/memory.db/` (LanceDB vector database)
+- **Embedding model**: `all-MiniLM-L6-v2` (80 MB, CPU-only, downloaded once from HuggingFace)
+- **Retrieval**: Top-k semantic search per turn — most relevant facts injected into system prompt
+- **Extraction**: After every response, a **Cohere LLM call** extracts new durable facts (name, preferences, etc.) and stores them as separate memory records
+- **Persistence**: Cross-session — memories survive restarts and are tied to `user_id`
+
+### Checkpoints (SQLite)
+
+- **Storage**: `data/checkpoints.sqlite` (single file, zero external deps)
+- **Trigger**: Saved automatically after every agent response
+- **Schema**: `id, user_id, session_id, thread_id, label, messages_json, created_at`
+- **Operations**: save, list, restore, fork into new session branch
+
+### ID Strategy
+
+| ID | Source | Scope |
+|----|--------|-------|
+| `user_id` | `--user` CLI flag or `DEFAULT_USER_ID` in settings | Cross-session persistent identity |
+| `session_id` | Auto-generated UUID at startup or `--session` flag | Groups one conversation run |
+| `checkpoint_id` | Auto-generated UUID at save time | Single snapshot within a session |
+
+> **Future login support**: `user_id` defaults to `user_arman_admin` but the system is designed to accept any UUID — just pass `--user <uuid>` when a login system is in place.
+
+---
+
+## Phase 0 — Voice Bot (WebSocket Server)
+
+### Voice Pipeline
+
+```
+User
+  │ Voice / Text (via WebSocket)
   ▼
-┌──────────────────────────────────────────────────────────┐
-│  WebSocket Server  (server.py)                           │
-│                                                          │
-│  Audio ──► Deepgram STT ──► Transcript                  │
-│  Text  ──────────────────► User message                 │
-│                                                          │
-│  Transcript / User message                               │
-│        ──► LLMStore.invoke_stream()   ← streams 1 sentence at a time
-│               │                                          │
-│               │  sentence 1                              │
-│               ▼                                          │
-│          KokoroTTS.speak_stream()     ← synthesizes + plays immediately
-│               │  sentence 2 (overlap)                    │
-│               ▼                                          │
-│            Speaker                                        │
-│                                                          │
-│  Full text response ──► WebSocket    ← client still gets text
-└──────────────────────────────────────────────────────────┘
+WebSocket Server (server.py)
+  │
+  ├─ Audio → Deepgram STT → Transcript
+  ├─ Text  ──────────────► User message
+  │
+  └─ LLMStore.invoke_stream()   ← streams one sentence at a time
+         │
+         ▼ sentence 1
+     TTS.stream_to_client()     ← synthesizes + sends audio immediately
+         │
+         ▼ sentence 2 (overlap)
+     Browser audio player
 ```
 
-Key latency property: the user **hears sentence 1** while the LLM is still
-generating sentence 2 onwards — eliminating the "wait for full response" delay.
+The user **hears sentence 1** while the LLM is still generating sentence 2 — minimizing TTFT.
 
-The `examples/` folder contains reference implementations using the **Pipecat SDK framework** (a different architecture using pipelines + transport layers). These are not used by the main server but are useful for learning.
+### Running the Voice Server
 
+```powershell
+.venv\Scripts\activate
+python server.py
+```
+
+**Expected startup output:**
+```
+Pipecat Voice Bot Server initialized
+Default LLM: groq
+LLM provider initialized: groq
+Server running on ws://0.0.0.0:8765
+```
+
+Then open `frontend/widget.html` in your browser.
 
 ---
 
@@ -81,203 +193,86 @@ The `examples/` folder contains reference implementations using the **Pipecat SD
 
 ### Prerequisites
 
-- **Python 3.10+** (tested on 3.13 and 3.14)
-
-Create the virtual environment (one-time):
+- Python 3.10+ (tested on 3.13)
 
 ```powershell
-py -3.13 -m venv .venv   # or py -3.14, py -3.11, etc.
+py -3.13 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### 1. Configure API Keys
+### Configure API Keys
 
 ```powershell
 Copy-Item .env.example .env
-# Edit .env and add your actual API keys
+# Edit .env and fill in your keys
 ```
 
-**Required keys:**
+**Required:**
 
-| Key | Service | Purpose |
-|-----|---------|---------|
-| `DEEPGRAM_API_KEY` | [Deepgram](https://deepgram.com) | Speech-to-text (required) |
+| Variable | Service | Purpose |
+|----------|---------|---------|
+| `DEEPGRAM_API_KEY` | [Deepgram](https://deepgram.com) | Voice → text |
+| `GROQ_API_KEY` | [Groq](https://console.groq.com) | Agent LLM (fast, free tier) |
+| `COHERE_API_KEY` | [Cohere](https://cohere.com) | Memory extraction LLM |
+| `TAVILY_API_KEY` | [Tavily](https://tavily.com) | Web search tool |
 
-**Exactly one LLM key** — only the provider matching `DEFAULT_LLM` is loaded at startup:
+**Optional (pick one for DEFAULT_LLM):**
 
-| Key | Service | Set `DEFAULT_LLM` to |
-|-----|---------|---------------------|
-| `COHERE_API_KEY` | [Cohere](https://cohere.com) | `cohere` |
-| `OPENAI_API_KEY` | [OpenAI](https://platform.openai.com) | `openai` |
-| `GEMINI_API_KEY` | [Google AI](https://ai.google.dev) | `gemini` |
-| `ANTHROPIC_API_KEY` | [Anthropic](https://anthropic.com) | `anthropic` |
-
-### 2. Install Dependencies
-
-```powershell
-& ".venv\Scripts\pip.exe" install -r requirements.txt
-```
+| Variable | Set `DEFAULT_LLM` to |
+|----------|---------------------|
+| `GROQ_API_KEY` | `groq` |
+| `COHERE_API_KEY` | `cohere` |
+| `OPENAI_API_KEY` | `openai` |
+| `GEMINI_API_KEY` | `gemini` |
+| `ANTHROPIC_API_KEY` | `anthropic` |
+| *(none)* | `ollama` (local) |
 
 ---
 
-## Running
-
-### Start the Server
-
-```powershell
-# Option A: Direct
-& ".venv\Scripts\python.exe" server.py
-
-# Option B: Helper script
-.\run_bot.ps1 server.py
-```
-
-**Expected output:**
-
-```
-[KokoroTTS] Loading model ...
-[OK] Model ready in 1.0s
-Pipecat Voice Bot Server initialized
-Default LLM: cohere
-LLM provider initialized: cohere
-Server running on ws://0.0.0.0:8765
-```
-
-> **Note:** On the very first start, Kokoro will download ~350 MB of model files
-> (`kokoro-v1.0.onnx` + `voices-v1.0.bin`) into `services/tts/`. Subsequent
-> starts load from disk in ~1 second.
-
-### Connect via Browser
-
-Open `client.html` in your browser. It connects to `ws://127.0.0.1:8765` and supports:
-- **Text chat**: Type a message and press Enter/Send
-- **Voice chat**: Click record, speak, click stop — audio is transcribed and sent to the LLM
-
-### Run Tests
-
-```powershell
-& ".venv\Scripts\python.exe" tests.py
-```
-
----
-
-## WebSocket API
-
-### Sending Messages
-
-**Text message:**
-```json
-{
-  "type": "text",
-  "data": "Hello, how are you?"
-}
-```
-
-**Audio message (base64-encoded):**
-```json
-{
-  "type": "audio",
-  "data": "UklGRi4AAABXQVZFZm10IBAAAA..."
-}
-```
-
-**Plain text** (non-JSON strings are also accepted as text input).
-
-### Receiving Messages
-
-**Bot response:**
-```json
-{
-  "type": "response",
-  "data": "I'm doing well! How can I help you?"
-}
-```
-
-**Error:**
-```json
-{
-  "type": "error",
-  "data": "Error description"
-}
-```
-
----
-
-## Configuration
-
-All settings are in `.env` (see `.env.example` for the full list).
+## Configuration Reference
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SERVER_HOST` | `0.0.0.0` | Server bind address |
-| `SERVER_PORT` | `8765` | Server port |
-| `DEFAULT_LLM` | `cohere` | **Only this provider loads at startup.** Options: `cohere` `openai` `gemini` `anthropic` |
-| `LLM_TEMPERATURE` | `0.7` | Response creativity (0.0–1.0) |
-| `LLM_MAX_TOKENS` | `500` | Max response length |
-| `COHERE_MODEL` | `command-a-03-2025` | Cohere model |
-| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model |
-| `ANTHROPIC_MODEL` | `claude-3-5-sonnet-20241022` | Anthropic model |
-| `DEEPGRAM_MODEL` | `nova-2` | Deepgram STT model |
-| `DEEPGRAM_LANGUAGE` | `en` | STT language |
-| `SYSTEM_INSTRUCTION` | *(helpful assistant prompt)* | Bot system prompt |
+| `DEFAULT_LLM` | `ollama` | Voice bot LLM provider |
+| `AGENT_LLM` | `groq` | Agent REPL LLM provider |
+| `MEMORY_LLM` | `cohere` | Fact extraction LLM |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model |
+| `GROQ_API_KEY` | — | Groq API key |
+| `MEMORY_ENABLED` | `true` | Enable/disable semantic memory |
+| `MEMORY_DB_PATH` | `./data/memory.db` | LanceDB directory |
+| `MEMORY_TOP_K` | `5` | Memories retrieved per turn |
+| `CHECKPOINT_ENABLED` | `true` | Enable/disable checkpoints |
+| `CHECKPOINT_DB_PATH` | `./data/checkpoints.sqlite` | SQLite file path |
+| `DEFAULT_USER_ID` | `user_arman_admin` | Default user (override with `--user`) |
+| `LLM_TEMPERATURE` | `0.7` | LLM response creativity |
+| `DEFAULT_TTS` | `cartesia` | TTS provider (`kokoro` or `cartesia`) |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
-**TTS is configured in `server.py`** (no env var needed):
-```python
-tts_service = KokoroTTS(
-    voice="af_heart",   # see AVAILABLE_VOICES in services/tts/kokoro_tts.py
-    speed=1.0,
-)
-```
+### System Prompt
+
+Edit `system.prompt` in the project root — loaded automatically at startup. Supports full Markdown. Falls back to `SYSTEM_INSTRUCTION` in `.env` if the file is missing.
 
 ---
 
 ## Extending
 
-### Adding a New LLM Provider
+### Adding a New LLM Provider (Voice Bot)
 
-1. Add a provider class in `services/llm/store.py` inheriting from `LLMProvider`
-2. Implement `invoke()`, `invoke_sync()`, and `invoke_stream()` methods
-3. Register it in `LLMStore._PROVIDER_FACTORIES` and `_API_KEY_ATTRS`
-4. Add the API key env var to `config/settings.py`
-5. Set `DEFAULT_LLM=<your_provider>` in `.env`
+1. Add a class inheriting `LLMProvider` in `services/llm/store.py`
+2. Implement `invoke()`, `invoke_sync()`, `invoke_stream()`
+3. Register in `LLMStore._PROVIDER_FACTORIES` and `_API_KEY_ATTRS`
+4. Add the key to `config/settings.py`
 
-```python
-class MyProvider(LLMProvider):
-    def __init__(self, api_key: str, model: str, temperature: float):
-        # Initialize your client
-        pass
+### Adding a New LLM Provider (Agent)
 
-    async def invoke(self, messages: List[BaseMessage]) -> str:
-        return await asyncio.to_thread(self.invoke_sync, messages)
+1. Add a `_create_<provider>` function in `services/agent/llm_factory.py`
+2. Register in the `create_llm` dispatch table
+3. Add the key to `config/settings.py`
 
-    def invoke_sync(self, messages: List[BaseMessage]) -> str:
-        response = self.client.invoke(messages)
-        return response.content
+### Adding Agent Tools
 
-    async def invoke_stream(self, messages: List[BaseMessage]) -> AsyncIterator[str]:
-        # Use the shared _stream_sentences helper with your client's .stream()
-        async def _tokens():
-            for t in self.client.stream(messages):
-                yield t
-        async for sentence in self._stream_sentences(_tokens(), lambda t: t.content):
-            yield sentence
-```
-
-### Changing the TTS Voice
-
-Edit the `KokoroTTS` constructor in `server.py`:
-
-```python
-tts_service = KokoroTTS(voice="am_adam", speed=1.0)  # deep US male voice
-```
-
-Available voices (run `from services.tts import AVAILABLE_VOICES; print(AVAILABLE_VOICES)`):
-- `af_heart` — US female, warm (default)
-- `af_bella` — US female, professional
-- `am_adam` — US male, deep
-- `am_michael` — US male, neutral
-- `bf_emma` — British female
-- `bm_george` — British male
+Add a `@tool`-decorated function to `services/agent/tools.py` and include it in `get_tools()`.
 
 ---
 
@@ -286,19 +281,20 @@ Available voices (run `from services.tts import AVAILABLE_VOICES; print(AVAILABL
 | Issue | Fix |
 |-------|-----|
 | `DEEPGRAM_API_KEY not set` | Add it to `.env` |
-| `DEFAULT_LLM not available` | Ensure the matching API key is in `.env` |
-| `Cannot import 'genai' from 'google'` | Run `pip install google-genai` |
-| Connection refused on port 8765 | Start `server.py` first |
-| Audio transcription fails | Check Deepgram API key; check `logs/pipecat.log` |
-| `.venv not found` | Create it: `py -3.13 -m venv .venv` |
-| Kokoro model files missing | They auto-download on first run (~350 MB); check your internet connection |
-| TTS sounds choppy | Increase sentence chunk size by tuning the `_BOUNDARY` regex in `store.py` |
-| High TTS latency (TTFT > 1s) | Short first sentences cause cold-start; try `speed=1.2` to reduce audio length |
+| `GROQ_API_KEY not configured` | Add it to `.env` and set `AGENT_LLM=groq` |
+| `no checkpoints found` | Ensure `data/` directory exists; check `logs/agent.log` |
+| Memory shows 0 on startup | `data/memory.db/` may not exist yet — send a message first |
+| HuggingFace download on first run | `all-MiniLM-L6-v2` (~80 MB) downloads once then caches |
+| Groq `tool_use_failed` error | Rephrase — Groq's tool-calling is sensitive to ambiguous queries |
+| Audio transcription fails | Check Deepgram key; see `logs/pipecat.log` |
+| Kokoro model missing | Auto-downloads ~350 MB on first run |
 
 ---
 
 ## Resources
 
-- [Pipecat Documentation](https://docs.pipecat.ai)
+- [LangGraph Docs](https://langchain-ai.github.io/langgraph/)
+- [LanceDB Docs](https://lancedb.github.io/lancedb/)
+- [Groq Console](https://console.groq.com)
 - [Deepgram Docs](https://developers.deepgram.com)
-- [LangChain Docs](https://python.langchain.com)
+- [Tavily API](https://docs.tavily.com)
