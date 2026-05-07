@@ -209,7 +209,19 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
         if _checkpoint_manager is not None:
             _checkpoint_manager.session_id = session.session_id
 
+        # Send a "processing" status so the client knows we're alive
+        try:
+            await websocket.send(json.dumps({
+                "type": "status",
+                "data": "processing",
+            }))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Client disconnected before agent invocation")
+            return ""
+
         # Invoke the full agent graph
+        import time as _time
+        _t0 = _time.perf_counter()
         logger.debug(f"Invoking agent graph (provider={settings.AGENT_LLM})...")
         result = await agent_graph.ainvoke({
             "messages": session.messages + [HumanMessage(content=user_text)],
@@ -218,6 +230,8 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
             "session_id": session.session_id,
             "last_retrieved_memories": [],
         })
+        _elapsed = _time.perf_counter() - _t0
+        logger.info(f"Agent ainvoke completed in {_elapsed:.2f}s")
 
         # Sync session state from graph result
         session.messages = result["messages"]
@@ -242,36 +256,46 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
         logger.debug(f"Split response into {len(sentences)} sentence(s)")
 
         for sentence in sentences:
-            # Send sentence text
-            await websocket.send(json.dumps({
-                "type": MessageType.SENTENCE,
-                "data": sentence,
-            }))
-
-            # Synthesize and send audio chunk
-            wav_bytes = await asyncio.get_event_loop().run_in_executor(
-                None, tts_service.synthesize_wav_bytes, sentence
-            )
-            if wav_bytes:
+            try:
+                # Send sentence text
                 await websocket.send(json.dumps({
-                    "type": MessageType.AUDIO_RESPONSE,
-                    "data": base64.b64encode(wav_bytes).decode("ascii"),
+                    "type": MessageType.SENTENCE,
+                    "data": sentence,
                 }))
 
+                # Synthesize and send audio chunk
+                wav_bytes = await asyncio.get_event_loop().run_in_executor(
+                    None, tts_service.synthesize_wav_bytes, sentence
+                )
+                if wav_bytes:
+                    await websocket.send(json.dumps({
+                        "type": MessageType.AUDIO_RESPONSE,
+                        "data": base64.b64encode(wav_bytes).decode("ascii"),
+                    }))
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning(f"Client disconnected mid-stream (sent {sentences.index(sentence)}/{len(sentences)} sentences)")
+                return response_text
+
         # Send full text response (signals completion)
-        await websocket.send(json.dumps({
-            "type": MessageType.RESPONSE,
-            "data": response_text,
-        }))
+        try:
+            await websocket.send(json.dumps({
+                "type": MessageType.RESPONSE,
+                "data": response_text,
+            }))
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning("Client disconnected before completion signal")
 
         return response_text
 
     except Exception as api_error:
         logger.error(f"Agent pipeline error: {api_error}")
-        await websocket.send(json.dumps({
-            "type": MessageType.ERROR,
-            "data": f"Agent error: {str(api_error)}",
-        }))
+        try:
+            await websocket.send(json.dumps({
+                "type": MessageType.ERROR,
+                "data": f"Agent error: {str(api_error)}",
+            }))
+        except websockets.exceptions.ConnectionClosed:
+            pass
         return ""
 
 
@@ -406,7 +430,10 @@ async def main():
 
     try:
         async with websockets.serve(
-            handle_client, settings.SERVER_HOST, settings.SERVER_PORT
+            handle_client, settings.SERVER_HOST, settings.SERVER_PORT,
+            ping_interval=30,
+            ping_timeout=30,
+            close_timeout=10,
         ):
             logger.info("WebSocket server ready - waiting for connections")
             await asyncio.Future()  # run forever
