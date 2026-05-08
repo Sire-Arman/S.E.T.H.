@@ -56,8 +56,9 @@ def _create_cohere(settings: "Settings") -> "BaseChatModel":
         cohere_api_key=settings.COHERE_API_KEY,
         model=settings.COHERE_MODEL,
         temperature=settings.LLM_TEMPERATURE,
+        max_tokens=settings.LLM_MAX_TOKENS,
     )
-    logger.info(f"Agent LLM: Cohere ({settings.COHERE_MODEL})")
+    logger.info(f"Agent LLM: Cohere ({settings.COHERE_MODEL}, max_tokens={settings.LLM_MAX_TOKENS})")
     return llm
 
 
@@ -73,8 +74,9 @@ def _create_ollama(settings: "Settings") -> "BaseChatModel":
         base_url=base_url,
         model=settings.OLLAMA_AGENT_MODEL,
         temperature=settings.LLM_TEMPERATURE,
+        num_predict=settings.LLM_MAX_TOKENS,
     )
-    logger.info(f"Agent LLM: Ollama ({settings.OLLAMA_AGENT_MODEL} @ {base_url})")
+    logger.info(f"Agent LLM: Ollama ({settings.OLLAMA_AGENT_MODEL} @ {base_url}, max_tokens={settings.LLM_MAX_TOKENS})")
     return llm
 
 
@@ -89,6 +91,7 @@ def _create_groq(settings: "Settings") -> "BaseChatModel":
         groq_api_key=settings.GROQ_API_KEY,
         model=settings.GROQ_MODEL,
         temperature=settings.LLM_TEMPERATURE,
+        max_tokens=settings.LLM_MAX_TOKENS,
     )
-    logger.info(f"Agent LLM: Groq ({settings.GROQ_MODEL})")
+    logger.info(f"Agent LLM: Groq ({settings.GROQ_MODEL}, max_tokens={settings.LLM_MAX_TOKENS})")
     return llm

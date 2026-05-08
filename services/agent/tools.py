@@ -49,43 +49,113 @@ def get_current_datetime(timezone_name: str = "Asia/Karachi") -> str:
 
 @tool
 async def web_search(query: str) -> str:
-    """Search the web for current information about a topic.
+    """Search the web for real-time, current information.
 
-    Use this when you need up-to-date information, recent events,
-    or facts you are not confident about.
+    ALWAYS use this tool when the user asks about:
+    - Sports scores, match results, standings
+    - News, current events, recent happenings
+    - Weather, stock prices, crypto prices
+    - Any factual question you're not 100% certain about
+    - "Who won", "what's the score", "what happened", "latest"
+
+    Do NOT refuse to search. Do NOT explain that you can't search.
+    Just call this tool with a clear, specific query.
+
+    Args:
+        query: A clear, specific search query. Be precise.
+              Good: "DC vs KKR IPL 2026 live score today"
+              Bad:  "cricket score"
     """
-    from langchain_tavily import TavilySearch
+    # ── Try Tavily first ──────────────────────────────────────────
+    tavily_result = await _search_tavily(query)
+    if tavily_result:
+        return tavily_result
 
-    api_key = os.getenv("TAVILY_API_KEY", "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")
+    # ── Fallback: Google via fetch_url ─────────────────────────────
+    logger.warning("Tavily search failed, falling back to Google scrape")
+    return await _search_google_fallback(query)
+
+
+async def _search_tavily(query: str) -> str | None:
+    """Try Tavily search. Returns formatted results or None on failure."""
+    api_key = os.getenv("TAVILY_API_KEY", "")
     if not api_key:
-        return "Error: TAVILY_API_KEY is not configured."
+        logger.warning("TAVILY_API_KEY not configured")
+        return None
 
     try:
+        from langchain_tavily import TavilySearch
+
         searcher = TavilySearch(
-            max_results=5,
+            max_results=3,
             topic="general",
             tavily_api_key=api_key,
         )
-        results = await searcher.ainvoke({"query": query})
+        raw = await searcher.ainvoke({"query": query})
 
-        # TavilySearch returns a list of dicts or a string depending on version
-        if isinstance(results, str):
-            return results
+        # TavilySearch returns different shapes depending on version:
+        #   - dict with "results" key (langchain_tavily >= 1.x)
+        #   - list of dicts (older versions)
+        #   - str (some error cases)
+        if isinstance(raw, str):
+            return raw.strip() or None
 
-        # Format results into readable text
-        if isinstance(results, list):
-            formatted = []
-            for i, r in enumerate(results, 1):
-                title = r.get("title", "")
-                url = r.get("url", "")
-                content = r.get("content", "")
-                formatted.append(f"[{i}] {title}\n    {url}\n    {content}")
-            return "\n\n".join(formatted) if formatted else "No results found."
+        # Extract the results list from dict or use directly if already a list
+        if isinstance(raw, dict):
+            results = raw.get("results", [])
+        elif isinstance(raw, list):
+            results = raw
+        else:
+            logger.warning(f"Unexpected Tavily response type: {type(raw)}")
+            return None
 
-        return str(results)
+        if not results:
+            return None
+
+        formatted = []
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "")
+            content = r.get("content", "")
+            if content:
+                formatted.append(f"[{i}] {title}: {content}")
+        return "\n".join(formatted) if formatted else None
+
     except Exception as e:
-        logger.error(f"Web search error: {e}")
-        return f"Search failed: {str(e)}"
+        logger.error(f"Tavily search error: {e}")
+        return None
+
+
+async def _search_google_fallback(query: str) -> str:
+    """Scrape Google search results as a fallback."""
+    import httpx
+    import trafilatura
+
+    search_url = f"https://www.google.com/search?q={query.replace(' ', '+')}&hl=en"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/133.0.0.0 Safari/537.36"
+        )
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            headers=headers, follow_redirects=True, timeout=15.0
+        ) as client:
+            resp = await client.get(search_url)
+            resp.raise_for_status()
+
+        extracted = trafilatura.extract(
+            resp.text, include_comments=False, include_tables=True, output_format="txt"
+        )
+        if extracted:
+            # Trim to keep context small
+            return extracted[:3000]
+        return "Search returned no usable results. Try a more specific query."
+    except Exception as e:
+        logger.error(f"Google fallback error: {e}")
+        return f"Search unavailable: {str(e)}"
 
 
 # ── URL Fetcher ─────────────────────────────────────────────────────
@@ -93,10 +163,14 @@ async def web_search(query: str) -> str:
 
 @tool
 async def fetch_url(url: str) -> str:
-    """Fetch and extract the main text content from a URL.
+    """Fetch and extract text from a specific URL.
 
-    Use this when the user provides a specific URL and wants you to
-    read, summarize, or answer questions about its content.
+    ONLY use this when the user gives you a specific URL to read.
+    Do NOT use this for searching — use web_search instead.
+    Do NOT invent URLs. Only fetch URLs the user provides.
+
+    Args:
+        url: The full URL to fetch (must start with http:// or https://).
     """
     import httpx
     import trafilatura
@@ -132,7 +206,7 @@ async def fetch_url(url: str) -> str:
             return f"Could not extract meaningful text content from {url}."
 
         # Truncate to avoid overwhelming the LLM context
-        max_chars = 8000
+        max_chars = 4000
         if len(extracted) > max_chars:
             extracted = extracted[:max_chars] + "\n\n... [content truncated]"
 
