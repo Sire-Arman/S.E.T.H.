@@ -35,3 +35,7 @@ server_output.txt
 *.bin
 *.pt
 *.safetensors
+
+# Frontend (Svelte/Vite)
+frontend/node_modules/
+frontend/dist/
