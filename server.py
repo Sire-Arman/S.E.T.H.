@@ -239,11 +239,27 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
 
         # Extract the final AI response text
         ai_message = session.messages[-1]
-        response_text = (
+        raw_text = (
             ai_message.content
             if isinstance(ai_message.content, str)
             else str(ai_message.content)
         )
+
+        # ── Sanity Filter: Strip raw tool tags (Groq leakage) ───────
+        import re as _re
+        # Remove <function...>...</function>, <|python_tag|>, etc.
+        clean_text = _re.sub(r"<function.*?>.*?</function>", "", raw_text, flags=_re.DOTALL)
+        clean_text = _re.sub(r"<\|.*?\|>", "", clean_text)
+        clean_text = _re.sub(r"<.*?>", "", clean_text)  # general tag cleanup
+        response_text = clean_text.strip()
+
+        # Fallback if the model only outputted tool calls but no response text
+        if not response_text:
+            if any(hasattr(m, "tool_calls") and m.tool_calls for m in session.messages[-2:]):
+                 response_text = "I couldn't find anything useful on that. Try being more specific."
+            else:
+                 response_text = "What's up? I'm ready when you are."
+
         logger.info(f"Bot response ({len(response_text)} chars): {response_text[:120]}...")
 
         # Log tool usage during this turn
