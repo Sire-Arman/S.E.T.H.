@@ -23,6 +23,7 @@ from services.stt import DeepgramSTT
 from services.tts import KokoroTTS, CartesiaTTS
 from models import MessageType
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langfuse.langchain import CallbackHandler
 
 # ──────────────────────────────────────────────────────────────────
 # Configuration
@@ -119,6 +120,13 @@ def _build_agent():
 
 agent_graph, _memory_store, _memory_extractor, _checkpoint_manager, _tools = _build_agent()
 
+# ── Langfuse Setup ────────────────────────────────────────────────
+langfuse_handler = None
+if settings.LANGFUSE_ENABLED:
+    # Picks up LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_HOST from environment
+    langfuse_handler = CallbackHandler()
+    logger.info(f"Langfuse observability enabled")
+
 
 # ──────────────────────────────────────────────────────────────────
 # Per-client session state
@@ -145,27 +153,40 @@ _MIN_WORDS = 5
 def split_into_sentences(text: str) -> list[str]:
     """Split response text into sentence-level chunks for TTS.
 
-    Matches the same boundary logic used by the old LLMStore._stream_sentences
-    so TTS receives natural, intonation-complete chunks.
+    Keeps fenced code blocks (```...```) and <artifact> blocks as single chunks.
+    Prose is split on sentence boundaries for natural TTS intonation.
     """
-    parts = _SENTENCE_BOUNDARY.split(text)
+    # 1. Separate code blocks and artifacts from prose
+    # Pattern matches ```...``` OR <artifact ...>...</artifact>
+    block_re = re.compile(r"(```[\s\S]*?```|<artifact[\s\S]*?</artifact>)", re.MULTILINE)
+    segments = block_re.split(text)
 
     sentences = []
-    buffer = ""
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
 
-    for part in parts:
-        buffer += part
-        # Yield when buffer has enough words or contains a newline break
-        if len(buffer.split()) >= _MIN_WORDS or "\n" in buffer:
-            clean = buffer.strip()
-            if clean:
-                sentences.append(clean)
-            buffer = ""
+        # If it's a code block or artifact, keep it as one chunk
+        if (segment.startswith("```") and segment.endswith("```")) or \
+           (segment.startswith("<artifact") and segment.endswith("</artifact>")):
+            sentences.append(segment)
+            continue
 
-    # Flush remainder
-    remainder = buffer.strip()
-    if remainder:
-        sentences.append(remainder)
+        # Otherwise, split prose on sentence boundaries
+        parts = _SENTENCE_BOUNDARY.split(segment)
+        buffer = ""
+        for part in parts:
+            buffer += part
+            if len(buffer.split()) >= _MIN_WORDS:
+                clean = buffer.strip()
+                if clean:
+                    sentences.append(clean)
+                buffer = ""
+
+        remainder = buffer.strip()
+        if remainder:
+            sentences.append(remainder)
 
     return sentences
 
@@ -182,6 +203,68 @@ logger.add(
 )
 logger.info("Pipecat Voice Bot Server initialized (Phase 3 — LangGraph agent)")
 logger.info(f"Agent LLM: {settings.AGENT_LLM}")
+
+
+# ------------------------------------------------------------------
+# Smart TTS router — decides what to speak vs. what to only display
+# ------------------------------------------------------------------
+
+def _get_tts_text(chunk: str) -> str | None:
+    """Return the text to send to TTS for a given response chunk.
+
+    - Code blocks (```...```)     → brief spoken summary, not the code itself
+    - Markdown lists / tables     → brief spoken summary
+    - Regular prose               → pass through unchanged
+    - Empty / whitespace          → skip (return None)
+    """
+    stripped = chunk.strip()
+    if not stripped:
+        return None
+
+    # ── Code blocks / Artifacts: speak a brief summary ──────────────
+    if stripped.startswith("```") or stripped.startswith("<artifact"):
+        # Handle <artifact> tags
+        if stripped.startswith("<artifact"):
+            import re as _re
+            lang_match = _re.search(r'language="([^"]+)"', stripped)
+            title_match = _re.search(r'title="([^"]+)"', stripped)
+            lang = lang_match.group(1) if lang_match else "code"
+            title = title_match.group(1) if title_match else ""
+            
+            if title:
+                return f"I've generated the {lang} code for {title}."
+            return f"I've generated the {lang} code for you."
+
+        # Handle standard ``` blocks
+        first_line = stripped.split("\n", 1)[0]
+        lang = first_line.replace("```", "").strip()
+        if lang:
+            return f"Here's some {lang} code."
+        return "Here's the code."
+
+    # ── Heavy markdown (many list items): summarize ───────────────
+    lines = stripped.split("\n")
+    list_lines = sum(1 for l in lines if l.strip().startswith(("- ", "* ", "• ")))
+    if list_lines >= 4:
+        return f"Here's a list with {list_lines} items."
+
+    numbered_lines = sum(1 for l in lines if l.strip()[:2].rstrip(".").isdigit())
+    if numbered_lines >= 4:
+        return f"Here are {numbered_lines} points."
+
+    # ── Regular prose: strip markdown formatting for cleaner TTS ──
+    import re as _re
+    tts = stripped
+    # Remove inline code backticks
+    tts = _re.sub(r"`([^`]+)`", r"\1", tts)
+    # Remove bold/italic markers
+    tts = _re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", tts)
+    # Remove links [text](url) → just text
+    tts = _re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", tts)
+    # Remove heading markers
+    tts = _re.sub(r"^#{1,6}\s+", "", tts)
+
+    return tts.strip() or None
 
 
 # ------------------------------------------------------------------
@@ -223,13 +306,28 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
         import time as _time
         _t0 = _time.perf_counter()
         logger.debug(f"Invoking agent graph (provider={settings.AGENT_LLM})...")
+
+        # Configuration for Langchain (checkpoints + observability)
+        config = {
+            "configurable": {
+                "user_id": session.user_id,
+                "session_id": session.session_id,
+            },
+            "callbacks": [langfuse_handler] if langfuse_handler else [],
+            "metadata": {
+                "user_id": session.user_id,
+                "session_id": session.session_id,
+                "agent": settings.AGENT_LLM
+            }
+        }
+
         result = await agent_graph.ainvoke({
             "messages": session.messages + [HumanMessage(content=user_text)],
             "memory_context": None,
             "user_id": session.user_id,
             "session_id": session.session_id,
             "last_retrieved_memories": [],
-        })
+        }, config=config)
         _elapsed = _time.perf_counter() - _t0
         logger.info(f"Agent ainvoke completed in {_elapsed:.2f}s")
 
@@ -245,12 +343,12 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
             else str(ai_message.content)
         )
 
-        # ── Sanity Filter: Strip raw tool tags (Groq leakage) ───────
+        # ── Sanity Filter: Strip raw tool tags (Groq/Llama leakage) ────
         import re as _re
-        # Remove <function...>...</function>, <|python_tag|>, etc.
-        clean_text = _re.sub(r"<function.*?>.*?</function>", "", raw_text, flags=_re.DOTALL)
-        clean_text = _re.sub(r"<\|.*?\|>", "", clean_text)
-        clean_text = _re.sub(r"<.*?>", "", clean_text)  # general tag cleanup
+        # Remove <function.web_search(...)>...</function> style tags
+        clean_text = _re.sub(r"<function\b.*?</function>", "", raw_text, flags=_re.DOTALL)
+        # Remove <|python_tag|>, <|eot_id|>, etc. (Llama internal tokens)
+        clean_text = _re.sub(r"<\|[a-z_]+\|>", "", clean_text)
         response_text = clean_text.strip()
 
         # Fallback if the model only outputted tool calls but no response text
@@ -273,21 +371,24 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
 
         for sentence in sentences:
             try:
-                # Send sentence text
+                # Send full text to frontend for rendering (always)
                 await websocket.send(json.dumps({
                     "type": MessageType.SENTENCE,
                     "data": sentence,
                 }))
 
-                # Synthesize and send audio chunk
-                wav_bytes = await asyncio.get_event_loop().run_in_executor(
-                    None, tts_service.synthesize_wav_bytes, sentence
-                )
-                if wav_bytes:
-                    await websocket.send(json.dumps({
-                        "type": MessageType.AUDIO_RESPONSE,
-                        "data": base64.b64encode(wav_bytes).decode("ascii"),
-                    }))
+                # Determine what to speak via TTS
+                tts_text = _get_tts_text(sentence)
+
+                if tts_text:
+                    wav_bytes = await asyncio.get_event_loop().run_in_executor(
+                        None, tts_service.synthesize_wav_bytes, tts_text
+                    )
+                    if wav_bytes:
+                        await websocket.send(json.dumps({
+                            "type": MessageType.AUDIO_RESPONSE,
+                            "data": base64.b64encode(wav_bytes).decode("ascii"),
+                        }))
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Client disconnected mid-stream (sent {sentences.index(sentence)}/{len(sentences)} sentences)")
                 return response_text

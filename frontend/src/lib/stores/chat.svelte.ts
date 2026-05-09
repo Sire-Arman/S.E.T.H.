@@ -8,7 +8,7 @@
 import { AudioPlayer } from '../services/audio-player';
 import { AudioRecorder } from '../services/audio-recorder';
 import { WakeWordDetector } from '../services/wake-word';
-import type { ConnectionState, ChatMessage, ServerMessage, MessageRole } from '../types';
+import type { ConnectionState, ChatMessage, ServerMessage, MessageRole, Artifact } from '../types';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -38,6 +38,8 @@ let connectionState = $state<ConnectionState>('disconnected');
 let messages = $state<ChatMessage[]>([]);
 let isRecording = $state(false);
 let wakeWordEnabled = $state(false);
+let activeArtifact = $state<Artifact | null>(null);
+let artifacts = $state<Artifact[]>([]);
 
 // ── Derived ─────────────────────────────────────────────────────
 
@@ -218,6 +220,18 @@ function toggleWakeWord(): boolean {
   return nowEnabled;
 }
 
+function openArtifact(artifact: Artifact): void {
+  activeArtifact = artifact;
+  // Track all opened artifacts
+  if (!artifacts.find((a) => a.id === artifact.id)) {
+    artifacts.push(artifact);
+  }
+}
+
+function closeArtifact(): void {
+  activeArtifact = null;
+}
+
 // ── Exported reactive store ─────────────────────────────────────
 
 export const chat = {
@@ -229,6 +243,8 @@ export const chat = {
   get isRecording() { return isRecording; },
   get wakeWordEnabled() { return wakeWordEnabled; },
   get wakeWordSupported() { return wakeWordSupported; },
+  get activeArtifact() { return activeArtifact; },
+  get artifacts() { return artifacts; },
 
   // Actions
   connect,
@@ -239,4 +255,6 @@ export const chat = {
   toggleRecording,
   toggleWakeWord,
   addMessage,
+  openArtifact,
+  closeArtifact,
 };

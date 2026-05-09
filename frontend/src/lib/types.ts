@@ -48,3 +48,11 @@ export interface ClientMessage {
   type: 'message' | 'audio' | 'text';
   data: string;
 }
+
+/** A code artifact displayed in the side panel */
+export interface Artifact {
+  id: string;
+  language: string;
+  code: string;
+  title?: string;
+}

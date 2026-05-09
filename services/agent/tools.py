@@ -221,9 +221,29 @@ async def fetch_url(url: str) -> str:
         return f"Failed to fetch URL: {str(e)}"
 
 
+# ── Code Generator ──────────────────────────────────────────────────
+
+
+@tool
+def generate_code(language: str, code: str, title: str = "") -> str:
+    """Generate a clean code block or script.
+
+    ALWAYS use this tool when the user asks for code, scripts, or classes
+    that are more than 5 lines long. This ensures the code is rendered
+    beautifully in the UI and is NOT read aloud by the voice assistant.
+
+    Args:
+        language: Programming language (python, javascript, svelte, etc.)
+        code: The actual code or script content.
+        title: Optional brief description or filename (e.g. 'Dijkstra Implementation').
+    """
+    # Wrap in specific artifact tags for server-side parsing
+    return f'<artifact language="{language}" title="{title}">\n{code}\n</artifact>'
+
+
 # ── Tool Registry ───────────────────────────────────────────────────
 
 
 def get_tools() -> list:
     """Return the list of tools available to the agent."""
-    return [get_current_datetime, web_search, fetch_url]
+    return [get_current_datetime, web_search, fetch_url, generate_code]
