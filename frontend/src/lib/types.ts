@@ -35,7 +35,10 @@ export type ServerMessageType =
   | 'status'
   | 'audio_response'
   | 'sentence'
-  | 'transcript';
+  | 'transcript'
+  | 'bot_start'
+  | 'bot_chunk'
+  | 'bot_end';
 
 /** Incoming message from the Python WebSocket server */
 export interface ServerMessage {

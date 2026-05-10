@@ -65,8 +65,47 @@ function addMessage(content: string, role: MessageRole): void {
   });
 }
 
+// Track the ID of the bot message currently being streamed into
+let activeBotMsgId: string | null = null;
+
 function handleServerMessage(msg: ServerMessage): void {
   switch (msg.type) {
+    // ── New streaming protocol ──────────────────────────────────
+    case 'bot_start':
+      // Create an empty bot bubble that chunks will append into
+      activeBotMsgId = uid();
+      messages.push({
+        id: activeBotMsgId,
+        role: 'bot',
+        content: '',
+        timestamp: Date.now(),
+      });
+      if (connectionState === 'processing') connectionState = 'speaking';
+      break;
+
+    case 'bot_chunk': {
+      // Append chunk text to the active bot message
+      if (activeBotMsgId) {
+        const idx = messages.findIndex((m) => m.id === activeBotMsgId);
+        if (idx !== -1) {
+          // Append with separator (newlines between chunks for markdown)
+          const prev = messages[idx].content;
+          messages[idx] = {
+            ...messages[idx],
+            content: prev ? prev + '\n\n' + msg.data : msg.data,
+          };
+        }
+      }
+      if (connectionState !== 'speaking') connectionState = 'speaking';
+      break;
+    }
+
+    case 'bot_end':
+      // Finalize the active bot message
+      activeBotMsgId = null;
+      break;
+
+    // ── Legacy sentence-per-bubble (backward compat) ────────────
     case 'sentence':
       addMessage(msg.data, 'bot');
       if (connectionState === 'processing') connectionState = 'speaking';
@@ -78,7 +117,7 @@ function handleServerMessage(msg: ServerMessage): void {
       break;
 
     case 'response':
-      // Final full response — sentences already displayed individually.
+      // Final full response — already displayed via chunks/sentences.
       break;
 
     case 'transcript':

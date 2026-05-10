@@ -70,6 +70,7 @@ function processKatex(text: string): string {
 // ── Mermaid Placeholder ──────────────────────────────────────────
 
 let mermaidIdCounter = 0;
+let renderCycleId = 0;
 
 /**
  * Wraps mermaid code in a placeholder div.
@@ -144,12 +145,33 @@ const PURIFY_CONFIG = {
 
 /**
  * Convert <artifact> tags into standard Markdown code blocks.
+ * Handles flexible attribute ordering (language/title in any order).
  */
 function processArtifacts(text: string): string {
-  return text.replace(/<artifact\s+language="([^"]+)"\s*(?:title="([^"]*)")?\s*>([\s\S]*?)<\/artifact>/g, (_, lang, title, code) => {
-    const header = title ? `### ${title}\n` : '';
-    return `\n\n${header}\`\`\`${lang}\n${code.trim()}\n\`\`\`\n\n`;
-  });
+  return text.replace(
+    /<artifact\s+([^>]*?)>([\s\S]*?)<\/artifact>/g,
+    (_, attrs, code) => {
+      const langMatch = attrs.match(/language="([^"]+)"/);
+      const titleMatch = attrs.match(/title="([^"]+)"/);
+      const lang = langMatch ? langMatch[1] : 'text';
+      const title = titleMatch ? titleMatch[1] : '';
+      const header = title ? `### ${title}\n` : '';
+      return `\n\n${header}\`\`\`${lang}\n${code.trim()}\n\`\`\`\n\n`;
+    }
+  );
+}
+
+/**
+ * Auto-close any unclosed fenced code blocks.
+ * LLMs sometimes truncate mid-block, leaving orphan ``` openers.
+ */
+function autoCloseFences(text: string): string {
+  // Count triple-backtick fences — if odd, append a closing one
+  const fences = text.match(/^```/gm);
+  if (fences && fences.length % 2 !== 0) {
+    return text + '\n```';
+  }
+  return text;
 }
 
 // ── Public API ───────────────────────────────────────────────────
@@ -161,8 +183,10 @@ function processArtifacts(text: string): string {
 export function purify(text: string): string {
   if (!text) return '';
 
-  // Reset artifact detection for this render
+  // Reset per-render state
   lastDetectedArtifacts = [];
+  mermaidIdCounter = 0;       // Prevent stale mermaid IDs across re-renders
+  renderCycleId++;
 
   // 1. Redact sensitive data
   let processed = redact(text);
@@ -170,13 +194,16 @@ export function purify(text: string): string {
   // 2. Process custom <artifact> tags → Markdown
   processed = processArtifacts(processed);
 
-  // 3. Process KaTeX math (before markdown to protect $ delimiters)
+  // 3. Auto-close any orphan code fences (LLM truncation)
+  processed = autoCloseFences(processed);
+
+  // 4. Process KaTeX math (before markdown to protect $ delimiters)
   processed = processKatex(processed);
 
-  // 4. Markdown → HTML (with Shiki code blocks + Mermaid placeholders)
+  // 5. Markdown → HTML (with Shiki code blocks + Mermaid placeholders)
   const html = markedInstance.parse(processed) as string;
 
-  // 5. Sanitize
+  // 6. Sanitize
   return DOMPurify.sanitize(html, PURIFY_CONFIG);
 }
 

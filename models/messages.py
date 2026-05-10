@@ -14,6 +14,9 @@ class MessageType(str, Enum):
     STATUS = "status"
     AUDIO_RESPONSE = "audio_response"   # base64 WAV chunk sent to browser
     SENTENCE = "sentence"               # individual sentence text during streaming
+    BOT_START = "bot_start"             # signal frontend to create empty bot bubble
+    BOT_CHUNK = "bot_chunk"             # append text to current bot bubble
+    BOT_END = "bot_end"                 # finalize current bot bubble
 
 
 class WebSocketMessage(BaseModel):
