@@ -39,3 +39,19 @@ server_output.txt
 # Frontend (Svelte/Vite)
 frontend/node_modules/
 frontend/dist/
+frontend/src-tauri/target/
+
+# PyInstaller build artifacts (large compiled binaries — never commit these)
+build/
+dist/
+*.spec.bak
+*.pyz
+*.pkg
+*.exe
+*.toc
+xref-*.html
+warn-*.txt
+
+# Data directories (may contain large files)
+data/
+models/
