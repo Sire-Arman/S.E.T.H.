@@ -39,19 +39,57 @@
 
   /**
    * Fix common LLM-generated Mermaid issues:
-   * - Unquoted node labels with special characters (&, |, etc.)
+   * - Unquoted node labels with special characters (&, |, <, >, (, ), ;, :, etc.)
+   * - Stray HTML entities
+   * - Missing semicolons between statements
    */
   function sanitizeMermaid(code: string): string {
-    // Quote node labels that contain & or other special chars
-    // Pattern: match `[Label with & special]` or `(Label with & chars)`
-    return code.replace(
-      /(\[|(?<!\|)\()([^\]\)]*[&<>][^\]\)]*)(\]|\))/g,
-      (_, open, label, close) => {
-        const q = open === '[' ? '["' : '("';
-        const qc = close === ']' ? '"]' : '")';
-        return q + label.trim() + qc;
-      }
+    let result = code;
+
+    // Quote node labels in square brackets that contain special chars
+    result = result.replace(
+      /\[([^\]"]*[&<>();:][^\]"]*)\]/g,
+      (_, label) => `["${label.trim()}"]`
     );
+
+    // Quote node labels in round brackets that contain special chars
+    result = result.replace(
+      /(?<!\|)\(([^)"]*[&<>;:][^)"]*)\)/g,
+      (_, label) => `("${label.trim()}")`
+    );
+
+    // Replace HTML entities that may break parsing
+    result = result.replace(/&amp;/g, '&');
+    result = result.replace(/&lt;/g, '<');
+    result = result.replace(/&gt;/g, '>');
+    result = result.replace(/&quot;/g, '"');
+
+    return result;
+  }
+
+  /**
+   * Aggressive sanitization for retry: quote ALL node labels,
+   * remove problematic characters, fix common structural issues.
+   */
+  function aggressiveSanitizeMermaid(code: string): string {
+    let result = sanitizeMermaid(code);
+
+    // Quote any remaining unquoted bracket labels (even without special chars)
+    result = result.replace(
+      /\[([^\]"]+)\]/g,
+      (_, label) => `["${label.trim()}"]`
+    );
+
+    // Quote any remaining unquoted paren labels
+    result = result.replace(
+      /(?<=\w)\(([^)"]+)\)/g,
+      (_, label) => `("${label.trim()}")`
+    );
+
+    // Remove any stray semicolons that aren't line terminators
+    result = result.replace(/;\s*$/gm, '');
+
+    return result;
   }
 
   /** Svelte action: renders mermaid placeholders after DOM injection. */
@@ -62,18 +100,30 @@
       const id = el.getAttribute('data-mermaid-id');
       if (!encoded || !id) return;
 
-      try {
-        let code = decodeURIComponent(atob(encoded));
-        code = sanitizeMermaid(code);
-        const { svg } = await mermaid.render(id, code);
-        el.innerHTML = svg;
-        el.classList.add('mermaid-rendered');
-      } catch {
-        // Fallback: show raw code in a styled code block
-        const code = decodeURIComponent(atob(encoded));
-        const escaped = code.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        el.innerHTML = `<div class="mermaid-fallback"><span class="mermaid-label">mermaid (render failed)</span><pre><code>${escaped}</code></pre></div>`;
+      const rawCode = decodeURIComponent(atob(encoded));
+
+      // Try rendering with progressive sanitization levels
+      const attempts = [
+        { code: sanitizeMermaid(rawCode), label: 'sanitized' },
+        { code: aggressiveSanitizeMermaid(rawCode), label: 'aggressive' },
+      ];
+
+      for (const attempt of attempts) {
+        try {
+          // Each attempt needs a unique ID to avoid mermaid cache issues
+          const attemptId = `${id}-${attempt.label}`;
+          const { svg } = await mermaid.render(attemptId, attempt.code);
+          el.innerHTML = svg;
+          el.classList.add('mermaid-rendered');
+          return; // Success — stop retrying
+        } catch {
+          // Continue to next attempt
+        }
       }
+
+      // All attempts failed — show raw code as a styled fallback
+      const escaped = rawCode.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      el.innerHTML = `<div class="mermaid-fallback"><span class="mermaid-label">mermaid (render failed)</span><pre><code>${escaped}</code></pre></div>`;
     });
 
     // Wire up copy buttons

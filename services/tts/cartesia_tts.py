@@ -304,6 +304,13 @@ class CartesiaTTS:
             for response in ctx.receive():
                 if response.type == "chunk" and response.audio:
                     chunks.append(response.audio)
+                elif response.type == "error":
+                    error_msg = getattr(response, 'error', 'unknown error')
+                    status = getattr(response, 'status_code', 'N/A')
+                    logger.error(
+                        f"[CartesiaTTS] API error (status={status}): {error_msg}"
+                    )
+                    break
                 elif response.type == "done":
                     break
 

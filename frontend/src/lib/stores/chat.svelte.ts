@@ -32,6 +32,19 @@ const audioPlayer = new AudioPlayer();
 const audioRecorder = new AudioRecorder();
 const wakeWord = new WakeWordDetector('hey');
 
+// Warm up AudioContext on first user interaction (click/keypress)
+// so browser autoplay policy doesn't block TTS playback later.
+function setupAudioWarmup(): void {
+  const handler = () => {
+    audioPlayer.warmup();
+    document.removeEventListener('click', handler);
+    document.removeEventListener('keydown', handler);
+  };
+  document.addEventListener('click', handler, { once: true });
+  document.addEventListener('keydown', handler, { once: true });
+}
+setupAudioWarmup();
+
 // ── Reactive State ──────────────────────────────────────────────
 
 let connectionState = $state<ConnectionState>('disconnected');
@@ -103,6 +116,11 @@ function handleServerMessage(msg: ServerMessage): void {
     case 'bot_end':
       // Finalize the active bot message
       activeBotMsgId = null;
+      // If no audio was queued (code/diagram-only response), transition to idle
+      // immediately. Otherwise the AudioPlayer callback will handle it.
+      if (connectionState === 'speaking' && !audioPlayer.isPlaying) {
+        connectionState = 'idle';
+      }
       break;
 
     // ── Legacy sentence-per-bubble (backward compat) ────────────
@@ -117,7 +135,23 @@ function handleServerMessage(msg: ServerMessage): void {
       break;
 
     case 'response':
-      // Final full response — already displayed via chunks/sentences.
+      // Final full response — last message in the protocol.
+      // Safety net: ensure we always leave 'speaking' state eventually.
+      if (connectionState === 'speaking') {
+        if (!audioPlayer.isPlaying) {
+          // No audio playing — go idle now
+          connectionState = 'idle';
+        } else {
+          // Audio is still playing — give it time, but set a hard deadline
+          setTimeout(() => {
+            if (connectionState === 'speaking') {
+              console.warn('[SETH] Speaking state stuck after response — forcing idle');
+              audioPlayer.forceStop();
+              connectionState = 'idle';
+            }
+          }, 15_000);
+        }
+      }
       break;
 
     case 'transcript':
@@ -208,6 +242,9 @@ function sendText(text: string): void {
   const trimmed = text.trim();
   if (!trimmed || !ws || ws.readyState !== WebSocket.OPEN) return;
 
+  // Warm up audio context on user gesture so TTS playback works
+  audioPlayer.warmup();
+
   addMessage(trimmed, 'user');
   ws.send(JSON.stringify({ type: 'message', data: trimmed }));
   connectionState = 'processing';
@@ -216,6 +253,8 @@ function sendText(text: string): void {
 async function startRecording(): Promise<void> {
   if (isRecording) return;
   try {
+    // Warm up audio context on user gesture so TTS playback works
+    audioPlayer.warmup();
     await audioRecorder.start();
     isRecording = true;
     connectionState = 'listening';

@@ -249,6 +249,12 @@ def _get_tts_text(chunk: str) -> str | None:
     if not stripped:
         return None
 
+    # ── Raw function tags (LLM leakage) → brief spoken summary ───
+    if stripped.startswith("<function=") or stripped.startswith("<function "):
+        if "generate_code" in stripped:
+            return "I've generated the code for you."
+        return None  # Unknown function tag — skip TTS
+
     # ── Fenced code blocks / Artifacts → brief spoken summary ────
     if stripped.startswith("```"):
         first_line = stripped.split("\n", 1)[0]
@@ -397,9 +403,29 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
             raw_text = "\n\n".join(code_artifacts) + "\n\n" + raw_text
             logger.debug(f"Prepended {len(code_artifacts)} code artifact(s) to response")
 
-        # ── Sanity Filter: Strip raw tool tags (Groq/Llama leakage) ────
-        # Remove <function.web_search(...)>...</function> style tags
-        clean_text = re.sub(r"<function\b.*?</function>", "", raw_text, flags=re.DOTALL)
+        # ── Sanity Filter: Strip / convert raw tool tags (Groq/Llama leakage)
+        clean_text = raw_text
+
+        # Convert <function=generate_code>{JSON}</function> → proper <artifact> tags
+        def _convert_generate_code(m):
+            try:
+                import json as _json
+                payload = _json.loads(m.group(1))
+                lang = payload.get("language", "text")
+                code = payload.get("code", "")
+                title = payload.get("title", "")
+                return f'<artifact language="{lang}" title="{title}">\n{code}\n</artifact>'
+            except Exception:
+                return ""  # Strip if we can't parse
+
+        clean_text = re.sub(
+            r"<function=generate_code>\s*(\{[\s\S]*?\})\s*</function>",
+            _convert_generate_code,
+            clean_text,
+        )
+
+        # Remove any remaining <function...>...</function> style tags
+        clean_text = re.sub(r"<function[\s=].*?</function>", "", clean_text, flags=re.DOTALL)
         # Remove <|python_tag|>, <|eot_id|>, etc. (Llama internal tokens)
         clean_text = re.sub(r"<\|[a-z_]+\|>", "", clean_text)
         response_text = clean_text.strip()
@@ -441,17 +467,32 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
                 tts_text = _get_tts_text(sentence)
                 if tts_text:
                     spoken_count += 1
-                    logger.debug(f"TTS [{spoken_count}/{_MAX_SPOKEN_SENTENCES}]: {tts_text[:60]}...")
-                    wav_bytes = await asyncio.get_event_loop().run_in_executor(
-                        None, tts_service.synthesize_wav_bytes, tts_text
-                    )
+                    logger.info(f"TTS [{spoken_count}/{_MAX_SPOKEN_SENTENCES}]: {tts_text[:60]}...")
+                    try:
+                        wav_bytes = await asyncio.wait_for(
+                            asyncio.get_event_loop().run_in_executor(
+                                None, tts_service.synthesize_wav_bytes, tts_text
+                            ),
+                            timeout=30.0,  # 30s safety net per sentence
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"TTS timed out for: {tts_text[:60]}...")
+                        wav_bytes = None
+                    except Exception as tts_err:
+                        logger.error(f"TTS error: {tts_err}", exc_info=True)
+                        wav_bytes = None
+
                     if wav_bytes:
+                        logger.info(f"TTS audio produced: {len(wav_bytes)} bytes, sending to client...")
                         if not await _ws_send(
                             websocket,
                             MessageType.AUDIO_RESPONSE,
                             base64.b64encode(wav_bytes).decode("ascii"),
                         ):
                             return response_text
+                        logger.info(f"TTS audio_response sent successfully")
+                    else:
+                        logger.warning(f"TTS produced empty/null wav_bytes for: {tts_text[:60]}...")
 
         # 3. Finalize the bot bubble
         if not await _ws_send(websocket, MessageType.BOT_END, ""):

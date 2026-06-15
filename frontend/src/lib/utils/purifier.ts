@@ -162,6 +162,32 @@ function processArtifacts(text: string): string {
 }
 
 /**
+ * Convert raw <function=generate_code>{...}</function> tags into Markdown code blocks.
+ *
+ * Groq/Llama models sometimes emit raw tool-call syntax instead of actually
+ * invoking the tool. This catches those and renders them as proper code blocks
+ * so they don't leak as ugly raw text into the chat UI.
+ */
+function processRawFunctionTags(text: string): string {
+  return text.replace(
+    /<function=generate_code>\s*(\{[\s\S]*?\})\s*<\/function>/g,
+    (_, jsonStr) => {
+      try {
+        const parsed = JSON.parse(jsonStr);
+        const lang = parsed.language || 'text';
+        const code = parsed.code || '';
+        const title = parsed.title || '';
+        const header = title ? `### ${title}\n` : '';
+        return `\n\n${header}\`\`\`${lang}\n${code}\n\`\`\`\n\n`;
+      } catch {
+        // If JSON parse fails, just strip the tags and show as-is
+        return `\n\n\`\`\`\n${jsonStr}\n\`\`\`\n\n`;
+      }
+    }
+  );
+}
+
+/**
  * Auto-close any unclosed fenced code blocks.
  * LLMs sometimes truncate mid-block, leaving orphan ``` openers.
  */
@@ -191,10 +217,13 @@ export function purify(text: string): string {
   // 1. Redact sensitive data
   let processed = redact(text);
 
-  // 2. Process custom <artifact> tags → Markdown
+  // 2. Convert raw <function=generate_code> tags → Markdown (Groq/Llama leakage)
+  processed = processRawFunctionTags(processed);
+
+  // 3. Process custom <artifact> tags → Markdown
   processed = processArtifacts(processed);
 
-  // 3. Auto-close any orphan code fences (LLM truncation)
+  // 4. Auto-close any orphan code fences (LLM truncation)
   processed = autoCloseFences(processed);
 
   // 4. Process KaTeX math (before markdown to protect $ delimiters)
