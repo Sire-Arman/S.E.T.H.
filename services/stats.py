@@ -199,7 +199,7 @@ class StatsStore:
                 "source": e.source,
             }
             for e in self.log_buffer
-            if order.index(e.level) >= min_idx if e.level in order else True
+            if (e.level not in order) or (order.index(e.level) >= min_idx)
         ]
         return entries[-n:]
 

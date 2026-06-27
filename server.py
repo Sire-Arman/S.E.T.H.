@@ -21,9 +21,29 @@ from config import Settings
 from services.agent import create_llm, get_tools, build_agent_graph
 from services.stt import DeepgramSTT
 from services.tts import KokoroTTS, CartesiaTTS, SmallestTTS
+from services.stats import stats
+from server_api import start_api_server
 from models import MessageType
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langfuse.langchain import CallbackHandler
+
+import sys
+# ── Force UTF-8 I/O on Windows (prevents charmap errors from LLM unicode output) ──
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# ── Loguru sink → control panel log buffer ────────────────────────────────
+def _stats_log_sink(message):
+    record = message.record
+    stats.add_log(
+        level=record["level"].name,
+        message=record["message"],
+        source=record["name"].split(".")[-1],
+    )
+
+logger.add(_stats_log_sink, level="DEBUG", format="{message}")
 
 # ──────────────────────────────────────────────────────────────────
 # Configuration
@@ -59,6 +79,9 @@ else:
         voice="af_heart",
         speed=1.0,
     )
+
+# Register TTS service reference for hot-reload from control panel
+stats.tts_service_ref = tts_service
 
 # ── LangGraph Agent (shared, compiled once) ───────────────────────
 
@@ -125,6 +148,19 @@ def _build_agent():
 
 
 agent_graph, _memory_store, _memory_extractor, _checkpoint_manager, _tools = _build_agent()
+
+# ── Register agent rebuild callback for Control Panel hot-reload ──────────
+async def _async_rebuild_agent():
+    """Async wrapper: rebuild agent graph in-place after prompt/config change."""
+    global agent_graph, _memory_store, _memory_extractor, _checkpoint_manager, _tools
+    try:
+        logger.info("[ControlPanel] Rebuilding agent graph...")
+        agent_graph, _memory_store, _memory_extractor, _checkpoint_manager, _tools = _build_agent()
+        logger.info("[ControlPanel] Agent graph rebuilt successfully")
+    except Exception as e:
+        logger.error(f"[ControlPanel] Agent rebuild failed: {e}")
+
+stats.rebuild_agent_cb = _async_rebuild_agent
 
 # ── Langfuse Setup ────────────────────────────────────────────────
 langfuse_handler = None
@@ -218,6 +254,7 @@ logger.add(
     level=settings.LOG_LEVEL,
     rotation="500 MB",
     retention="7 days",
+    encoding="utf-8",
 )
 logger.info("Pipecat Voice Bot Server initialized (Phase 3 — LangGraph agent)")
 logger.info(f"Agent LLM: {settings.AGENT_LLM}")
@@ -377,6 +414,19 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
         _elapsed = _time.perf_counter() - _t0
         logger.info(f"Agent ainvoke completed in {_elapsed:.2f}s")
 
+        # ── Track token usage from the AI response ────────────────────
+        try:
+            _ai_msg = result["messages"][-1]
+            _usage = getattr(_ai_msg, "usage_metadata", None)
+            if _usage:
+                stats.record_llm(
+                    input_tokens=_usage.get("input_tokens", 0),
+                    output_tokens=_usage.get("output_tokens", 0),
+                    provider=settings.AGENT_LLM,
+                )
+        except Exception:
+            pass  # Token tracking is best-effort
+
         # Sync session state from graph result
         session.messages = result["messages"]
         session.last_retrieved_memories = result.get("last_retrieved_memories", [])
@@ -474,6 +524,10 @@ async def process_and_stream(user_text: str, session: ClientSession, websocket) 
                 if tts_text:
                     spoken_count += 1
                     logger.info(f"TTS [{spoken_count}/{_MAX_SPOKEN_SENTENCES}]: {tts_text[:60]}...")
+                    # Track TTS characters
+                    tts_provider = settings.DEFAULT_TTS
+                    stats.record_tts(len(tts_text), provider=tts_provider)
+
                     try:
                         wav_bytes = await asyncio.wait_for(
                             asyncio.get_event_loop().run_in_executor(
@@ -525,6 +579,7 @@ async def handle_client(websocket):
     """Handle incoming WebSocket client connection."""
     client_id = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
     logger.info(f"Client connected: {client_id}")
+    stats.session_count += 1
 
     # Create per-client session with unique session_id
     session = ClientSession(
@@ -579,6 +634,11 @@ async def handle_client(websocket):
                         # Transcribe using Deepgram
                         logger.debug("Transcribing audio with Deepgram...")
                         transcript = await stt_service.transcribe(audio_bytes)
+
+                        # Track audio duration for rate limit monitoring
+                        # Estimate from bytes: 16kHz 16-bit mono = 32 bytes/ms
+                        _audio_secs = len(audio_bytes) / 32_000
+                        stats.record_stt(_audio_secs, provider="deepgram")
 
                         if not transcript:
                             await websocket.send(
@@ -647,8 +707,13 @@ async def handle_client(websocket):
 
 
 async def main():
-    """Run the WebSocket server."""
+    """Run the WebSocket server and Control Panel HTTP API."""
     logger.info(f"Starting server on ws://{settings.SERVER_HOST}:{settings.SERVER_PORT}")
+
+    # Start HTTP control panel API
+    api_host = getattr(settings, "API_SERVER_HOST", "127.0.0.1")
+    api_port = getattr(settings, "API_SERVER_PORT", 8766)
+    await start_api_server(api_host, api_port)
 
     try:
         async with websockets.serve(

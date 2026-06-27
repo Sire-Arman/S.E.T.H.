@@ -12,6 +12,10 @@ class Settings:
     SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
     SERVER_PORT: int = int(os.getenv("SERVER_PORT", "8765"))
 
+    # Control Panel API settings
+    API_SERVER_HOST: str = os.getenv("API_SERVER_HOST", "127.0.0.1")
+    API_SERVER_PORT: int = int(os.getenv("API_SERVER_PORT", "8766"))
+
     # API Keys
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     COHERE_API_KEY: str = os.getenv("COHERE_API_KEY", "")

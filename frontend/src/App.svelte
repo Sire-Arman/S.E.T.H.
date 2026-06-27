@@ -1,9 +1,11 @@
 <script lang="ts">
   import { chat } from './lib/stores/chat.svelte';
+  import { controlPanel as cp } from './lib/stores/controlPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import ChatPanel from './lib/components/ChatPanel.svelte';
   import ChatInput from './lib/components/ChatInput.svelte';
   import ArtifactPanel from './lib/components/ArtifactPanel.svelte';
+  import ControlPanel from './lib/components/ControlPanel.svelte';
   import { preloadHighlighter } from './lib/utils/shiki';
   import { preloadKatex } from './lib/utils/purifier';
 
@@ -16,7 +18,9 @@
   });
 </script>
 
-<div class="app" class:panel-open={chat.activeArtifact !== null}>
+<div class="app" class:panel-open={chat.activeArtifact !== null} class:dev-open={cp.isOpen}>
+  <ControlPanel />
+
   <div class="chat-container">
     <StatusBar
       connectionState={chat.connectionState}
@@ -52,6 +56,12 @@
     display: flex;
     justify-content: center;
     position: relative;
+    transition: padding-right 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* When Dev Panel is open, shift the whole app area left */
+  .app.dev-open {
+    padding-right: 380px;
   }
 
   .chat-container {
@@ -78,6 +88,9 @@
     .app.panel-open .chat-container {
       max-width: 100vw;
     }
+    .app.dev-open {
+      padding-right: 0;
+    }
   }
 
   /* Subtle side glow for desktop */
@@ -89,3 +102,4 @@
     }
   }
 </style>
+
