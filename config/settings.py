@@ -20,6 +20,7 @@ class Settings:
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     CARTESIA_API_KEY: str = os.getenv("CARTESIA_API_KEY", "")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    SMALLEST_API_KEY: str = os.getenv("SMALLEST_API_KEY", "")
 
 
     # LLM Configuration
@@ -45,11 +46,15 @@ class Settings:
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     # TTS Configuration
-    DEFAULT_TTS: str = os.getenv("DEFAULT_TTS", "kokoro")  # kokoro or cartesia
+    DEFAULT_TTS: str = os.getenv("DEFAULT_TTS", "kokoro")  # kokoro, cartesia, or smallest
 
     # Cartesia TTS Settings
     CARTESIA_VOICE_ID: str = os.getenv("CARTESIA_VOICE_ID", "f786b574-daa5-4673-aa0c-cbe3e8534c02")
     CARTESIA_MODEL: str = os.getenv("CARTESIA_MODEL", "sonic-3")
+
+    # Smallest.ai TTS Settings
+    SMALLEST_VOICE_ID: str = os.getenv("SMALLEST_VOICE_ID", "olivia")
+    SMALLEST_MODEL: str = os.getenv("SMALLEST_MODEL", "lightning_v3.1")
 
     # Deepgram STT Settings
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova-2")

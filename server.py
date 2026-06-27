@@ -20,7 +20,7 @@ import websockets
 from config import Settings
 from services.agent import create_llm, get_tools, build_agent_graph
 from services.stt import DeepgramSTT
-from services.tts import KokoroTTS, CartesiaTTS
+from services.tts import KokoroTTS, CartesiaTTS, SmallestTTS
 from models import MessageType
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langfuse.langchain import CallbackHandler
@@ -47,6 +47,12 @@ if settings.DEFAULT_TTS == "cartesia":
         api_key=settings.CARTESIA_API_KEY,
         voice_id=settings.CARTESIA_VOICE_ID,
         model_id=settings.CARTESIA_MODEL,
+    )
+elif settings.DEFAULT_TTS == "smallest":
+    tts_service = SmallestTTS(
+        api_key=settings.SMALLEST_API_KEY,
+        voice_id=settings.SMALLEST_VOICE_ID,
+        model_id=settings.SMALLEST_MODEL,
     )
 else:
     tts_service = KokoroTTS(
